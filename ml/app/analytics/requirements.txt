@@ -1,0 +1,13 @@
+librosa==0.7.2
+matplotlib~=3.3.0
+numpy~=1.18.5
+scikit-learn==0.22.2.post1
+scikit-sound==0.2.3
+scipy==1.4.1
+SoundFile==0.10.3.post1
+torch~=1.6.0
+torchvision~=0.7.0
+pandas==1.1.0
+pyhocon~=0.3.55
+opencv-python~=4.3.0.36
+audiomentations==0.13.0

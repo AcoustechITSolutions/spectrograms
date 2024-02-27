@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<!---<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang=""> -->
+<html>
+<head>
+
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8"/>
+ <br/>
+<style type="text/css">
+<!--
+	@font-face {
+	font-family: 'MnReg';
+	font-weight: 400;
+	src: url({{mn_reg}}) format('truetype');
+}
+@font-face {
+	font-family: 'MnMedium';
+	font-weight: 500;
+	src: url({{mn_medium}}) format('truetype');
+}
+@font-face {
+	font-family: 'MnBold';
+	font-weight: 700;
+	src: url({{mn_bold}}) format('truetype');
+}
+@font-face {
+	font-family: 'MnSBold';
+	font-weight: 600;
+	src: url({{mn_sbold}}) format('truetype');
+}
+@font-face {
+	font-family: 'MnEBold';
+	font-weight: 600;
+	src: url({{mn_ebold}}) format('truetype');
+}
+	p {margin: 0; padding: 0;}	.ft10{font-size:52px;font-family:MnBold;color:#ffffff;}
+-->
+</style>
+</head>
+<body bgcolor="#FFFFFF">
+<div id="page1-div" style="position:absolute;width:892px;height:1262px;">
+<img width="892" height="1262" src="{{main}}" alt="background image"/>
+<p style="position:absolute;top:318px;left:72px;white-space:nowrap" class="ft10">РЕЗУЛЬТАТЫ АНАЛИЗА</p>
+<p style="position:absolute;top:382px;left:72px;white-space:nowrap" class="ft10">КАШЛЯ</p>
+</div>
+</body>
+</html>
+<!DOCTYPE html>
+<html>
+
+<head>
+<title></title>
+
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8"/>
+ <br/>
+<style type="text/css">
+<!--
+	@font-face {
+	font-family: 'MnReg';
+	font-weight: 400;
+	src: url({{mn_reg}}) format('truetype');
+}
+@font-face {
+	font-family: 'MnMedium';
+	font-weight: 500;
+	src: url({{mn_medium}}) format('truetype');
+}
+@font-face {
+	font-family: 'MnBold';
+	font-weight: 700;
+	src: url({{mn_bold}}) format('truetype');
+}
+@font-face {
+	font-family: 'MnSBold';
+	font-weight: 600;
+	src: url({{mn_sbold}}) format('truetype');
+}
+@font-face {
+	font-family: 'MnEBold';
+	font-weight: 600;
+	src: url({{mn_ebold}}) format('truetype');
+}
+	p {margin: 0; padding: 0;}	.ft20{font-size:31px;font-family:MnBold;color:#662382;}
+	.ft21{font-size:16px;font-family:MnReg;color:#6f6e6e;}
+	.ft22{font-size:16px;font-family:MnReg;color:#1d1d1b;}
+-->
+</style>
+</head>
+<body bgcolor="#FFFFFF" vlink="blue" link="blue">
+<div id="page2-div" style="position:absolute;top:1264px;width:892px;height:1262px;">
+<img style="position:absolute;top:400px;left:65px;" width="800" height="700" src="{{spectrogram}}" alt="background image"/>
+<p style="position:absolute;top:63px;left:53px;white-space:nowrap" class="ft20">ИСХОДНЫЕ ДАННЫЕ</p>
+<p style="position:absolute;top:250px;left:53px;white-space:nowrap" class="ft21">Длительность аудиозаписи:</p>
+<p style="position:absolute;top:290px;left:54px;white-space:nowrap" class="ft21">Частота дискретизации:</p>
+<p style="position:absolute;top:353px;left:54px;white-space:nowrap" class="ft22">Общее визуальное предсталение аудиозаписи:</p>
+<p style="position:absolute;top:250px;left:362px;white-space:nowrap" class="ft22">{{duration_audio}} с</p>
+<p style="position:absolute;top:290px;left:362px;white-space:nowrap" class="ft22">{{samplerate}} кГц</p>
+<p style="position:absolute;top:139px;left:53px;white-space:nowrap" class="ft21">Идентификатор пользователя:</p>
+<p style="position:absolute;top:176px;left:54px;white-space:nowrap" class="ft21">Возраст:</p>
+<p style="position:absolute;top:139px;left:362px;white-space:nowrap" class="ft22">{{user_id}}</p>
+<p style="position:absolute;top:176px;left:362px;white-space:nowrap" class="ft22">{{age}}</p>
+<p style="position:absolute;top:210px;left:54px;white-space:nowrap" class="ft21">Курение:</p>
+<p style="position:absolute;top:210px;left:362px;white-space:nowrap" class="ft22">{{issmoke}}</p>
+<!-- <p style="position:absolute;top:245px;left:54px;white-space:nowrap" class="ft21">Хронические заболевания:</p>
+<p style="position:absolute;top:245px;left:362px;white-space:nowrap" class="ft22">{{disease}}</p> -->
+</div>
+</body>
+</html>
+<!DOCTYPE html>
+<html>
+<head>
+<title></title>
+
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8"/>
+ <br/>
+<style type="text/css">
+	@font-face {
+	font-family: 'MnReg';
+	font-weight: 400;
+	src: url({{mn_reg}}) format('truetype');
+}
+@font-face {
+	font-family: 'MnMedium';
+	font-weight: 500;
+	src: url({{mn_medium}}) format('truetype');
+}
+@font-face {
+	font-family: 'MnBold';
+	font-weight: 700;
+	src: url({{mn_bold}}) format('truetype');
+}
+@font-face {
+	font-family: 'MnSBold';
+	font-weight: 600;
+	src: url({{mn_sbold}}) format('truetype');
+}
+@font-face {
+	font-family: 'MnEBold';
+	font-weight: 600;
+	src: url({{mn_ebold}}) format('truetype');
+}
+	p {margin: 0; padding: 0;}	.ft30{font-size:31px;font-family:MnBold;color:#662382;}
+	.ft31{font-size:16px;font-family:MnReg;color:#6f6e6e;}
+	.ft32{font-size:16px;font-family:MnReg;color:#1d1d1b;}
+	.ft33{font-size:19px;font-family:MnBold;color:#b4365b;}
+
+</style>
+</head>
+<body bgcolor="#FFFFFF" vlink="blue" link="blue">
+<div id="page3-div" style="position:absolute;top:2560px;width:892px;height:1262px;">
+<img style="position:absolute;top:400px;left:65px; "width="800" height="700" src="{{episodes_spectre}}" alt="background image"/>
+<p style="position:absolute;top:60px;left:53px;white-space:nowrap" class="ft30">РЕЗУЛЬТАТЫ ДЕТЕКТИРОВАНИЯ</p>
+<p style="position:absolute;top:170px;left:53px;white-space:nowrap" class="ft31">Количество зафиксированных приступов кашля:</p>
+<p style="position:absolute;top:210px;left:53px;white-space:nowrap" class="ft31">Длительность приступов кашля:</p>
+<p style="position:absolute;top:318px;left:54px;white-space:nowrap" class="ft31">Среднее время приступа:&#160;</p>
+<p style="position:absolute;top:355px;left:54px;white-space:nowrap" class="ft31">Максимальное время приступа:</p>
+<p style="position:absolute;top:170px;left:520px;white-space:nowrap" class="ft32">{{episodes.count}}</p>
+<p style="position:absolute;top:318px;left:310px;white-space:nowrap" class="ft32">{{episodes.mean}} с</p>
+<p style="position:absolute;top:355px;left:360px;white-space:nowrap" class="ft32">{{episodes.max}} с</p>
+<p style="position:absolute;top:391px;left:54px;white-space:nowrap" class="ft31">Минимальное время приступа:</p>
+<p style="position:absolute;top:391px;left:360px;white-space:nowrap" class="ft32">{{episodes.min}} с</p>
+<p style="position:absolute;top:423px;left:54px;white-space:nowrap" class="ft31">Общая длительность кашля:</p>
+<p style="position:absolute;top:423px;left:360px;white-space:nowrap" class="ft32">{{episodes.overall}} с</p>
+
+{% for episode_duration in episodes.duration_each %}
+    <p style="position:absolute;top:{{240 + loop.index0 * 25}}px;left:53px;white-space:nowrap" class="ft32">{{loop.index}}) {{episode_duration}} с</p>
+{% endfor %}
+
+<p style="position:absolute;top:130px;left:53px;white-space:nowrap" class="ft33">РЕЗУЛЬТАТЫ ПОИСКА ЭПИЗОДОВ КАШЛЯ В АУДИОПОТОКЕ</p>
+</div>
+</body>
+</html>
+<!DOCTYPE html>
+<html>
+<head>
+<title></title>
+
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8"/>
+ <br/>
+<style type="text/css">
+<!--
+	@font-face {
+	font-family: 'MnReg';
+	font-weight: 400;
+	src: url({{mn_reg}}) format('truetype');
+}
+@font-face {
+	font-family: 'MnMedium';
+	font-weight: 500;
+	src: url({{mn_medium}}) format('truetype');
+}
+@font-face {
+	font-family: 'MnBold';
+	font-weight: 700;
+	src: url({{mn_bold}}) format('truetype');
+}
+@font-face {
+	font-family: 'MnSBold';
+	font-weight: 600;
+	src: url({{mn_sbold}}) format('truetype');
+}
+@font-face {
+	font-family: 'MnEBold';
+	font-weight: 600;
+	src: url({{mn_ebold}}) format('truetype');
+}
+	p {margin: 0; padding: 0;}	.ft40{font-size:22px;font-family:MnBold;color:#662382;}
+	.ft41{font-size:12px;font-family:MnReg;color:#6f6e6e;}
+	.ft42{font-size:12px;font-family:MnReg;color:#1d1d1b;}
+	.ft43{font-size:12px;font-family:MnReg;color:#000000;}
+	.ft44{font-size:9px;font-family:MnReg;color:#ffffff;}
+	.ft45{font-size:25px;font-family:MnBold;color:rgba(255, 255, 255, 0.7);}
+	.diag{font-size:25px;font-family:MnBold;color:#ffffff;}
+	.ft46{font-size:12px;line-height:27px;font-family:MnReg;color:#1d1d1b;}
+	.ft47{font-size:12px;line-height:23px;font-family:MnReg;color:#000000;}
+-->
+</style>
+</head>
+<body bgcolor="#FFFFFF" vlink="blue" link="blue">
+<div id="page4-div" style="position:absolute;top:3900px;width:892px;height:1262px;">
+
+<img style="position:absolute;top: 24.0%;left:220px;" width="450" height="300" src="{{main_feature}}"/>
+<img style="position:absolute;top: 47.62%;left:220px;" width="450" height="300" src="{{second_feat}}"/>
+<p style="position:absolute;top:4.75%;left:6.72%;bottom: 92.04%;right: 28.24%;white-space:nowrap" class="ft40">ОЦЕНКА ML КЛАССИФИКАТОРА</p>
+<p style="position:absolute;left: 6.72%;right: 59.16%;top: 27.2%;bottom: 65.68%;white-space:nowrap" class="ft41">Оценка показателей</p>
+<p style="position:absolute;right: 6.72%;left: 6.72%;top: 8.91%;bottom: 87.53%;white-space:nowrap" class="ft47">Независимая&#160;оценка&#160;отдельных&#160;эпизодов&#160;кашля,&#160;классификация&#160;и&#160;скоринг&#160;на&#160;базе&#160;<br/>анализа основных акустических свойств звука кашля.</p>
+<p style="position:absolute;top:369px;left: 6.72%;white-space:nowrap" class="ft41">для топ-3 основных</p>
+<p style="position:absolute;top:391px;left: 6.72%;white-space:nowrap" class="ft41">признаков в</p>
+<p style="position:absolute;top:412px;left: 6.72%;white-space:nowrap" class="ft41">сравнении со здоровым</p>
+<p style="position:absolute;top:434px;left: 6.72%;white-space:nowrap" class="ft41">человеком:</p>
+<p style="position:absolute;top:632px;left: 6.72%;white-space:nowrap" class="ft41">Оценка показателей</p>
+<p style="position:absolute;top:654px;left: 6.72%;white-space:nowrap" class="ft41">средних значений для</p>
+<p style="position:absolute;top:676px;left: 6.72%;white-space:nowrap" class="ft41">топ-3 основных</p>
+<p style="position:absolute;top:697px;left: 6.72%;white-space:nowrap" class="ft41">признаков в сравнении</p>
+<p style="position:absolute;top:719px;left: 6.72%;white-space:nowrap" class="ft41">со здоровым человеком</p>
+<p style="position:absolute;top:195px;left: 6.72%;white-space:nowrap" class="ft41">Эпизод</p>
+<p style="position:absolute;top:195px;left: 192px;white-space:nowrap" class="ft41">Диагноз</p>
+<p style="position:absolute;top:195px;left: 345px;white-space:nowrap" class="ft41">Оценка</p>
+
+{% for diag, prob in ml_pred %}
+    <p style="position:absolute;top:{{220 + loop.index0 * 25}}px; left: 6.72%;white-space:nowrap" class="ft46">{{loop.index}}</p>
+    <p style="position:absolute;top:{{220 + loop.index0 * 25}}px; left: 192px;white-space:nowrap" class="ft46">{{diag}}</p>
+	<p style="position:absolute;top:{{220 + loop.index0 * 25}}px; left: 345px;white-space:nowrap" class="ft42">{{prob|float|round(8)}}</p>
+{% endfor %}
+
+<img style="position:absolute;left: 51.76%;right: 6.72%;top: 15.56%;bottom: 76.13%;" width="247" height="70" src="{{score_bg}}" alt="background image"/>
+<p style="position:absolute;left: 53.62%;right: 25.04%;top: 16.63%;bottom: 82.07%;; line-height: 11px;white-space:nowrap" class="ft44">Суммарная оценка:</p>
+<hr style="position: absolute;left: 53.5%;top: 17.3%;bottom: 81.35%;color:#FFFFFF; width:215px;height:1px;background-color: #ffffff;border-width: 0px;" >
+<p style="position:absolute;left: 53.62%;right: 25.04%;top: 18%;bottom: 77.08%;white-space:nowrap; line-height: 30px;" class="diag">{{diagnosis}}</p>
+<p style="position:absolute;left: 70.51%;right: 11.24%;top: 18%;bottom: 77.08%;white-space:nowrap;" class="ft45">{{ml_mean_probability}}</p>
+</div>
+</body>
+</html>
+<!DOCTYPE html>
+<html>
+<head>
+<title></title>
+
+<meta http-equiv="Content-Type" content="text/html; charset=UTF-8"/>
+ <br/>
+<style type="text/css">
+<!--
+	@font-face {
+	font-family: 'MnReg';
+	font-weight: 400;
+	src: url({{mn_reg}}) format('truetype');
+}
+@font-face {
+	font-family: 'MnMedium';
+	font-weight: 500;
+	src: url({{mn_medium}}) format('truetype');
+}
+@font-face {
+	font-family: 'MnBold';
+	font-weight: 700;
+	src: url({{mn_bold}}) format('truetype');
+}
+@font-face {
+	font-family: 'MnSBold';
+	font-weight: 600;
+	src: url({{mn_sbold}}) format('truetype');
+}
+@font-face {
+	font-family: 'MnEBold';
+	font-weight: 600;
+	src: url({{mn_ebold}}) format('truetype');
+}
+	p {margin: 0; padding: 0;}	.ft50{font-size:31px;font-family:MnBold;color:#662382;}
+	.ft51{font-size:21px;font-family:MnBold;color:#6f6e6e;}
+	.ft52{font-size:21px;font-family:MnBold;color:#b4365b;}
+	.ft53{font-size:55px;font-family:MnBold;color:#b4365b;}
+	.ft54{font-size:16px;font-family:MnReg;color:#6f6e6e;}
+	.ft55{font-size:16px;font-family:MnReg;color:#1d1d1b;}
+	.ft56{font-size:16px;font-family:MnReg;color:#000000;}
+	.ft57{font-size:12px;font-family:MnReg;color:#ffffff;}
+	.ft58{font-size:36px;font-family:MnReg;color:#ffffff;}
+	.ft59{font-size:16px;line-height:27px;font-family:MnReg;color:#1d1d1b;}
+	.ft510{font-size:16px;line-height:23px;font-family:MnReg;color:#000000;}
+	.ft40{font-size:22px;font-family:MnBold;color:#662382;}
+	.ft41{font-size:12px;font-family:MnReg;color:#6f6e6e;}
+	.ft42{font-size:12px;font-family:MnReg;color:#1d1d1b;}
+	.ft43{font-size:12px;font-family:MnReg;color:#000000;}
+	.ft44{font-size:9px;font-family:MnReg;color:#ffffff;}
+	.ft45{font-size:25px;font-family:MnBold;color:rgba(255, 255, 255, 0.7);}
+	.diag{font-size:25px;font-family:MnBold;color:#ffffff;}
+	.ft46{font-size:12px;line-height:27px;font-family:MnReg;color:#1d1d1b;}
+	.ft47{font-size:12px;line-height:23px;font-family:MnReg;color:#000000;}
+-->
+</style>
+</head>
+<body bgcolor="#FFFFFF" vlink="blue" link="blue">
+<div id="page5-div" style="position:absolute;top:5250px;width:892px;height:1262px;">
+<p style="position:absolute;top:62px;left:53px;white-space:nowrap" class="ft50">ОЦЕНКА DL КЛАССИФИКАТОРА</p>
+<p style="position:absolute;top:960px;left:53px;white-space:nowrap" class="ft50">АГРЕГИРОВАННЫЙ РЕЗУЛЬТАТ</p>
+<p style="position:absolute;top:1052px;left:53px;white-space:nowrap" class="ft51">ПОДОЗРЕНИЕ</p>
+<p style="position:absolute;top:1052px;left:491px;white-space:nowrap" class="ft51">РЕКОМЕНДАЦИЯ:</p>
+<p style="position:absolute;top:1107px;left:53px;white-space:nowrap" class="ft51">ОЦЕНКА</p>
+<p style="position:absolute;top:1136px;left:53px;white-space:nowrap" class="ft51">ВЕРОЯТНОСТИ</p>
+<p style="position:absolute;top:1052px;left:300px;white-space:nowrap" class="ft52">{{diagnosis}}</p>
+<p style="position:absolute;top:1093px;left:491px;right: 10.72%;  white-space: pre-line; overflow-wrap: normal;display: inline-block; width: 225px; word-break: normal" class="ft52">{{recommendation}}</p>
+<!--<p style="position:absolute;top:1121px;left:491px;white-space:nowrap" class="ft52">ПОСЕЩЕНИЕ ВРАЧА</p>-->
+<p style="position:absolute;top:1100px;left:300px;white-space:nowrap" class="ft53">{{sum_probability}}</p>
+<p style="position:absolute;top:195px;left:53px;white-space:nowrap" class="ft54">Эпизод</p>
+<p style="position:absolute;top:195px;left:192px;white-space:nowrap" class="ft54">Диагноз</p>
+<p style="position:absolute;top:195px;left:345px;white-space:nowrap" class="ft54">Оценка</p>
+
+{% for diag, prob in dl_pred %}
+    <p style="position:absolute;top:{{220 + loop.index0 * 25}}px; left:53px;white-space:nowrap" class="ft46">{{loop.index}}</p>
+    <p style="position:absolute;top:{{220 + loop.index0 * 25}}px; left:192px;white-space:nowrap" class="ft46">{{diag}}</p>
+	<p style="position:absolute;top:{{220 + loop.index0 * 25}}px; left:345px;white-space:nowrap" class="ft42">{{prob|float|round(8)}}</p>
+{% endfor %}
+
+<img style="position:absolute;left: 51.76%;right: 6.72%;top: 15.56%;bottom: 76.13%;" width="247" height="70" src="{{score_bg}}" alt="background image"/>
+<p style="position:absolute;left: 53.62%;right: 25.04%;top: 16.63%;bottom: 82.07%;; line-height: 11px;white-space:nowrap" class="ft44">Суммарная оценка:</p>
+<hr style="position: absolute;left: 53.5%;top: 17.3%;bottom: 81.35%;color:#FFFFFF; width:215px;height:1px;background-color: #ffffff;border-width: 0px;" >
+<p style="position:absolute;left: 53.62%;right: 25.04%;top: 18%;bottom: 77.08%;white-space:nowrap; line-height: 30px;" class="diag">{{diagnosis}}</p>
+<p style="position:absolute;left: 70.51%;right: 11.24%;top: 18%;bottom: 77.08%;white-space:nowrap;" class="ft45">{{dl_mean_probability}}</p>
+
+<p style="position:absolute;top:114px;left:53px;white-space:nowrap" class="ft510">Независимая&#160;оценка&#160;отдельных&#160;эпизодов&#160;кашля,&#160;классификация&#160;и&#160;скоринг&#160;на&#160;базе&#160;<br/>визуального анализа спектрограмм.</p>
+<p style="position:absolute;top:1005px;left:53px;white-space:nowrap" class="ft56">Итоговый результат на основе оценки ML и DL классификаторов.</p>
+</div>
+</body>
+</html>
+

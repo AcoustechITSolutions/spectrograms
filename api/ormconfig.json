@@ -1,0 +1,14 @@
+{
+    "type": "postgres",
+    "host": "localhost",
+    "port": 5432,
+    "username": "acoustery",
+    "password": "acoustery",
+    "database": "acoustery_db",
+    "schema": "public",
+    "entities": ["dist/infrastructure/entity/*.js"],
+    "migrations": ["dist/infrastructure/migrations/*.js"],
+    "cli": {
+        "migrationsDir": "src/infrastructure/migrations/"
+    }
+}
