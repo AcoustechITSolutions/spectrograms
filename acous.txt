@@ -1,0 +1,4336 @@
+{
+   data:
+   {
+       name = classification
+       permission_key = PATH_TO_KEY
+       # cache_data is optional field. It stores data from database in specified dir
+       # and if there are some samples from previous launches they won't be downloaded from database
+       cache_data = PATH_TO_CACHE_DATA
+       audio_type = cough
+       not_downloadable = "('coughvid', 'git1141')"
+       output = PATH_TO_SAVE_DATA
+       spectrogram = mfcc
+       balance_classes = True
+       eval_size = 100
+       augmentation_size = 700
+   }
+   model:
+   {
+       name = attention_cnn
+       args:
+       {
+           dropout_rate = 0.1
+           input_shape = [20, 256]
+       }
+   }
+   train:
+   {
+       batch_size = 72
+       num_epochs = 100
+       eval_step_epochs = 1
+       epochs_to_save_model = 15
+       optimizer:
+       {
+           type = Adam
+           momentum = 0.9
+       }
+       lr:
+       {
+           scheduler = cos
+           base_lr = 0.000045
+           gamma=0.95
+           milestones = [20, 40, 60]
+           warmup:
+           {
+               type = gradual
+               epoch = 3
+               multiplier = 1.0
+           }
+       }
+  }
+}
+
+{
+   data:
+   {
+       name = classification
+       permission_key = PATH_TO_KEY
+       # cache_data is optional field. It stores data from database in specified dir
+       # and if there are some samples from previous launches they won't be downloaded from database
+       cache_data = PATH_TO_CACHE_DATA
+       audio_type = cough
+       not_downloadable = "('coughvid')"
+       output = PATH_TO_SAVE_DATA
+       spectrogram = mfcc
+       balance_classes = True
+       eval_size = 100
+       augmentation_size = 700
+   }
+   model:
+   {
+       name = attention_tscnn
+       args:
+       {
+           dropout_rate = 0.15
+           input_shape = [20, 256]
+       }
+   }
+   train:
+   {
+       batch_size = 40
+       num_epochs = 100
+       eval_step_epochs = 1
+       epochs_to_save_model = 15
+       optimizer:
+       {
+           type = Adam
+           momentum = 0.9
+       }
+       lr:
+       {
+           scheduler = cos
+           base_lr = 0.00008
+           gamma=0.95
+           milestones = [20, 40, 60]
+           warmup:
+           {
+               type = gradual
+               epoch = 3
+               multiplier = 1.0
+           }
+       }
+  }
+}
+
+{
+   data:
+   {
+       name = classification
+       permission_key = PATH_TO_KEY
+       # cache_data is optional field. It stores data from database in specified dir
+       # and if there are some samples from previous launches they won't be downloaded from database
+       cache_data = PATH_TO_CACHE_DATA
+       audio_type = cough_and_breath
+       not_downloadable = "('coughvid')"
+       output = PATH_TO_SAVE_DATA
+       spectrogram = mfcc
+       balance_classes = True
+       eval_size = 2
+       augmentation_size = 150
+   }
+   model:
+   {
+       name = attention_cnn_double
+       args:
+       {
+           dropout_rate = 0.1
+           input_shape = [20, 256]
+       }
+   }
+   train:
+   {
+       batch_size = 8
+       num_epochs = 50
+       eval_step_epochs = 1
+       epochs_to_save_model = 2
+       checkpoi1nt = PATH_TO_CHECKPOINT
+       # put 1 on saving if need to generate and save wav samples via evaluation else 0
+       path_to_audio = PATH_TO_AUDIO
+       optimizer:
+       {
+           type = Adam
+           momentum = 0.9
+       }
+       lr:
+       {
+           scheduler = cos
+           base_lr = 0.000033
+           gamma=0.95
+           warmup:
+           {
+               type = gradual
+               epoch = 3
+               multiplier = 1.0
+           }
+       }
+  }
+}
+
+#!/usr/bin/env
+import torch
+
+
+def evaluate(model, eval_loader, metric, num_classes, criterion=None):
+   """
+   Model evaluation function
+   :param model: model to evaluate. Subclass of pytorch module
+   :param eval_loader: instance of pytorch DataLoader class to read data
+   :param metric: metric to evaluate. Instance of pytorch metric
+   :param criterion: instance of pytorch loss structures (optional)
+   :return metric value for model calculated on provided data and eval loss if it was specified in arguments
+   """
+   metric.flush()
+   model.eval()
+   eval_loss = None
+   with torch.no_grad():
+       for idx, batch in enumerate(eval_loader):
+           # if batch tuple has 4 elements than this is recurrent type of model
+           # otherwise this is simple non sequential model (like CNN or something like this)
+           if len(batch) == 3:
+               label, data, pad_lengths = batch
+               preds = model.forward((data, pad_lengths))
+           else:
+               label, data = batch
+               preds = model.forward(data)
+           if criterion is not None:
+               if eval_loss is None:
+                   eval_loss = criterion(preds, torch.unsqueeze(label, 1))
+               else:
+                   n = idx + 1
+                   eval_loss = (eval_loss * n / (n + 1)) + criterion(preds, torch.unsqueeze(label, 1)) / (n + 1)
+           # convert probabilities to bin answers using 0.5 threshold
+           preds = torch.round(preds)
+           metric.update(torch.squeeze(preds), label)
+
+   if eval_loss is None:
+       return metric.compute()
+   return eval_loss, metric.compute()
+
+#!/usr/bin/env
+import torch
+from torch.utils.data import DataLoader
+import torchaudio.transforms as T
+
+from data.data_pipeline.dataset import BaseDatasetTorch
+from core.train.eval import evaluate
+from data.data_pipeline.utils import make_torch_collate_fn
+from metrics.f1_measure import F1Measure
+from metrics.accuracy_metric import AccuracyMetric
+from core.train.utils import custom_load_dict
+
+
+def eval_pipeline(config, model):
+   """
+   Evaluation pipeline function
+   :param config: train config
+   :param model: model to evaluate
+   """
+
+   # load model
+   model_weights = torch.load(config.get_string('model'))
+   model = custom_load_dict(model, model_weights)
+
+   # init GPU device
+   device = torch.device('cuda')
+   # load model into GPU
+   model = model.to(device)
+
+   mfcc_transform = T.MFCC(
+       sample_rate=44100,
+       n_mfcc=20, melkwargs={'n_fft': 2048, 'n_mels': 128, 'hop_length': 512})
+
+   # init data loader
+   dataset = BaseDatasetTorch(config.get_string('eval_data'), mfcc_transform)
+   dataloader = DataLoader(
+       dataset,
+       config.get_int('batch_size'),
+       shuffle=True,
+       collate_fn=make_torch_collate_fn(device, model.shape[-1])
+   )
+   print('Model loading finished.')
+   print('Start evaluation')
+   acc_val = evaluate(model, dataloader, AccuracyMetric(), config['num_classes'])
+   f1_val = evaluate(model, dataloader, F1Measure(), config['num_classes'])
+   print('Evaluation finished.')
+
+#!/usr/bin/env
+from torch.optim import SGD, \
+                       RMSprop, \
+                       Adam
+from torch.optim.lr_scheduler import StepLR, \
+                                    MultiStepLR, \
+                                    ExponentialLR, \
+                                    CosineAnnealingLR
+from core.train.warmup_scheduler import GradualWarmupScheduler, \
+                                       ConstantWarmupScheduler
+
+
+def create_optimizer(model, config):
+   """
+   This function is responsible for choosing different optimizer
+   algorithms and methods to adjust the learning rate.
+   :param model: pytorch model
+   :param config: training configuration
+   """
+   momentum = config.optimizer.momentum if 'optimizer.momentum' in config else 0.9
+
+   types_optimizer = {'SGD': SGD(model.parameters(), lr=config.lr.base_lr),
+                      'Momentum': SGD(model.parameters(), lr=config.lr.base_lr, momentum=momentum),
+                      'RMSprop': RMSprop(model.parameters(), lr=config.lr.base_lr),
+                      'Adam': Adam(model.parameters(), lr=config.lr.base_lr)
+                      }
+   optimizer = types_optimizer[config.optimizer.type]
+
+   f_epochs = config.num_epochs - config.lr.warmup.epoch\
+       if 'lr.warmup.epoch' in config else config.num_epochs
+   milestones = config.lr.milestones if 'lr.milestones' in config else [int(f_epochs/4),
+                                                                        int(f_epochs/3),
+                                                                        int(f_epochs/2)
+                                                                        ]
+   gamma = config.lr.gamma if 'lr.gamma' in config else 0.95
+
+   types_scheduler = {'cos': CosineAnnealingLR(optimizer, T_max=f_epochs, eta_min=0, last_epoch=-1),
+                      'exp': ExponentialLR(optimizer, gamma=gamma),
+                      'step': StepLR(optimizer, step_size=f_epochs // 3),
+                      'multistep': MultiStepLR(optimizer, milestones=milestones, gamma=gamma)
+                      }
+   scheduler = types_scheduler[config.lr.scheduler]
+
+   if 'lr.warmup' in config:
+       types_warmup = {'constant': ConstantWarmupScheduler,
+                       'gradual': GradualWarmupScheduler}
+       scheduler = types_warmup[config.lr.warmup.type](
+           optimizer,
+           config.lr.warmup.multiplier,
+           config.lr.warmup.epoch,
+           scheduler
+       )
+
+   return optimizer, scheduler
+
+#!/usr/bin/env
+import torch
+from torch.utils.tensorboard import SummaryWriter
+from core.train.eval import evaluate
+
+
+def train(model, train_loader, eval_loader,
+         optimizer, scheduler, criterion, metric,
+         model_name, epochs, eval_step_epochs=5,
+         save_ckpt_epochs=100, num_classes=1):
+   """
+   Train loop function.
+   :param model: model to train. Subclass of pytorch module
+   :param train_loader: instance of pytorch DataLoader class to read data
+   :param eval_loader: instance of pytorch DataLoader class to read data
+   :param optimizer: pytorch entity optimizer
+   :param scheduler: optimizer scheduler to control learning rate
+   :param criterion: instance of pytorch loss structures
+   :param metric: metric to evaluate. Instance of pytorch metric
+   :param model_name: str with model name to save checkpoints
+   :param epochs: int with number of epochs to train
+   :param eval_step_epochs: make evaluation every 'eval_step_epochs' steps
+   :param save_ckpt_epochs: save checkpoint with model state every 'save_ckpt_epochs' epochs
+   :param num_classes: number of training classes
+   :return trained model. Subclass of pytorch module
+   """
+
+   writer = SummaryWriter()
+
+   model.train()
+   best_metric_val, metric_val = None, None
+
+   for epoch in range(epochs):
+       writer.add_scalar('LR', *scheduler.get_last_lr(), epoch)
+       epoch_loss = None
+       # train epoch
+       for idx, batch in enumerate(train_loader):
+
+           # if batch tuple has 4 elements than this is recurrent type of model
+           # otherwise this is simple non sequential model (like CNN or something like this)
+           if len(batch) == 3:
+               # compute loss
+               label, data, pad_lengths = batch
+               if num_classes == 1:
+                   loss_val = criterion(model.forward((data, pad_lengths)), torch.unsqueeze(label, 1))
+               else:
+                   loss_val = criterion(model.forward((data, pad_lengths)), label.squeeze().long())
+           else:
+               label, batch = batch
+               target = torch.unsqueeze(label, 1).to(dtype=torch.long)
+               loss_val = criterion(model.forward(batch), target)
+           # update average epoch loss
+           if epoch_loss is None:
+               epoch_loss = loss_val
+           else:
+               n = idx + 1
+               epoch_loss = (epoch_loss * n / (n + 1)) + loss_val / (n + 1)
+           # compute gradients and make optimization
+           optimizer.zero_grad()
+           loss_val.backward()
+           optimizer.step()
+       writer.add_scalar('Loss Train', epoch_loss, epoch)
+       print(f'Finished epoch number {epoch}')
+       # update learning rate
+       scheduler.step()
+       if epoch != 0 and epoch % eval_step_epochs == 0:
+           eval_loss, metric_val = evaluate(model, eval_loader, metric, num_classes, criterion)
+           # restore train mode
+           model.train()
+           writer.add_scalar('Loss Eval', eval_loss, epoch)
+           writer.add_scalar('Eval metric', metric_val, epoch)
+           print('Model evaluated')
+           # save the best checkpoint
+           if best_metric_val is None or metric_val >= best_metric_val:
+               torch.save(model.state_dict(), f'./runs/best_{model_name}.ckpt')
+               best_metric_val = metric_val
+       if epoch != 0 and epoch % save_ckpt_epochs == 0:
+           torch.save(model.state_dict(), f'./runs/{model_name}_{epoch}.ckpt')
+   # save the last checkpoint
+   torch.save(model.state_dict(), f'./runs/{model_name}_{epochs}.ckpt')
+
+#!/usr/bin/env
+import torch
+import torch.nn as nn
+import torchaudio.transforms as T
+from torch_audiomentations import Compose, Gain, Shift
+
+from torch.utils.data import DataLoader
+from core.train.train import train
+from core.train.optimizer import create_optimizer
+from data.data_pipeline.dataset import BaseDatasetTorch
+from metrics.accuracy_metric import AccuracyMetric
+from data.data_pipeline.utils import make_torch_collate_fn
+from core.train.utils import custom_load_dict, WeightedBCE
+
+
+def train_pipeline(config, model):
+   """
+   This is function is responsible for creating all necessary entities
+   for training and calling train process itself
+   :param config: training configuration
+   :param model: pytorch model
+   """
+   # define metric
+   metric = AccuracyMetric()
+
+   mfcc_transform = T.MFCC(
+       sample_rate=44100,
+       n_mfcc=20, melkwargs={'n_fft': 2048, 'n_mels': 128, 'hop_length': 512})
+
+   apply_augmentation = Compose(
+       transforms=[
+           Gain(min_gain_in_db=-5.0, max_gain_in_db=5.0, p=0.3),
+           Shift(min_shift=-2, max_shift=2, p=0.5)
+       ])
+
+   # init dataset handlers
+   train_dataset = BaseDatasetTorch(config['train_data'], mfcc_transform, apply_augmentation)
+   eval_dataset = BaseDatasetTorch(config['eval_data'], mfcc_transform)
+   print(f'Size of training dataset: {len(train_dataset)}')
+   pos_count, neg_count = train_dataset.pos_items(), train_dataset.neg_items()
+   print(f'Positive samples: {pos_count}   Negative samples: {neg_count}')
+   print(f'Size of evaluation dataset: {len(eval_dataset)}')
+
+   # define loss
+   if config.get_int('num_classes') == 1:
+       criterion = WeightedBCE([1, round(neg_count/pos_count, 1)])
+   else:
+       criterion = nn.CrossEntropyLoss()
+
+   # init GPU device
+   device = torch.device('cuda')
+
+   if 'checkpoint' in config:
+       model_weights = torch.load(config['checkpoint'])
+       model = custom_load_dict(model, model_weights)
+
+   # load model into GPU
+   model = model.to(device)
+   # create DataLoaders
+   train_dataloader = DataLoader(
+       train_dataset,
+       config.get_int('batch_size'),
+       shuffle=False,
+       collate_fn=make_torch_collate_fn(device, model.shape[-1])
+   )
+
+   eval_dataloader = DataLoader(
+       eval_dataset,
+       config.get_int('batch_size'),
+       shuffle=True,
+       collate_fn=make_torch_collate_fn(device, model.shape[-1])
+   )
+
+   num_epochs = config['num_epochs']
+   print(f'Total epoch: {num_epochs}')
+
+   # make optimizer and scheduler
+   optimizer, scheduler = create_optimizer(model, config)
+
+   # run training process
+   train(model, train_dataloader, eval_dataloader,
+         optimizer, scheduler, criterion, metric,
+         config.get_string('model_name'), num_epochs,
+         config.get_int('eval_step_epochs'), config.get_int('epochs_to_save_model'),
+         config.get_int('num_classes'))
+
+#!/usr/bin/env
+from collections import OrderedDict
+
+import torch
+import torch.nn as nn
+
+
+def custom_load_dict(model, model_weights):
+
+   new = list(model_weights.items())
+   count = 0
+   model_weights = OrderedDict()
+   for key, value in model.state_dict().items():
+       layer_name, weig = new[count]
+       model_weights[key] = weig
+       count += 1
+   model.load_state_dict(model_weights)
+   return model
+
+
+class WeightedBCE(nn.Module):
+   def __init__(self, weights_ar):
+
+       super().__init__()
+       self._weights = weights_ar
+
+   def forward(self, output_, target_):
+       weights_arr = self._weights
+       if weights_arr is not None:
+           assert len(weights_arr) == 2
+           output_ = torch.clamp(output_, min=1e-8, max=1 - 1e-8)
+           output_ = torch.where(torch.isnan(output_), torch.zeros_like(output_), output_)
+           loss_v = weights_arr[1] * (target_ * torch.log(output_)) + \
+                    weights_arr[0] * ((1 - target_) * torch.log(1 - output_))
+       else:
+           loss_v = target_ * torch.log(output_) + (1 - target_) * torch.log(1 - output_)
+
+       return torch.neg(torch.mean(loss_v))
+from torch.optim.lr_scheduler import _LRScheduler
+
+
+class GradualWarmupScheduler(_LRScheduler):
+   def __init__(self, optimizer, multiplier, total_epoch, after_scheduler=None):
+       self._multiplier = multiplier
+       if self._multiplier < 1.:
+           raise ValueError('multiplier should be greater thant or equal to 1.')
+       self._total_epoch = total_epoch
+       self._after_scheduler = after_scheduler
+       self._finished = False
+       self._last_lr = 0
+       super(GradualWarmupScheduler, self).__init__(optimizer)
+
+   def get_lr(self):
+       if self.last_epoch > self._total_epoch:
+           if self._after_scheduler:
+               if not self._finished:
+                   self._after_scheduler.base_lrs = [base_lr * self._multiplier for base_lr in self.base_lrs]
+                   self._finished = True
+                   return self._last_lr
+               return self._after_scheduler.get_last_lr()
+           return [base_lr * self._multiplier for base_lr in self.base_lrs]
+
+       if self._multiplier == 1.0:
+           return [base_lr * (float(self.last_epoch) / self._total_epoch) for base_lr in self.base_lrs]
+       else:
+           return [base_lr * ((self._multiplier - 1.) * self.last_epoch / self._total_epoch + 1.)
+                   for base_lr in self.base_lrs]
+
+   def step(self, epoch=None):
+       if self._finished and self._after_scheduler:
+           if epoch is None:
+               self._after_scheduler.step(None)
+           else:
+               self._after_scheduler.step(epoch - self._total_epoch)
+           self._last_lr = self._after_scheduler.get_last_lr()
+       else:
+           return super(GradualWarmupScheduler, self).step(epoch)
+
+
+class ConstantWarmupScheduler(_LRScheduler):
+   def __init__(self, optimizer, multiplier, total_epoch, after_scheduler=None):
+       self._multiplier = multiplier
+       self._total_epoch = total_epoch
+       self._after_scheduler = after_scheduler
+       self._finished = False
+       self._last_lr = 0
+       super(ConstantWarmupScheduler, self).__init__(optimizer)
+
+   def get_lr(self):
+       if self.last_epoch > self._total_epoch:
+           if self._after_scheduler:
+               if not self._finished:
+                   self._finished = True
+               return self._after_scheduler.get_last_lr()
+       return [base_lr * self._multiplier for base_lr in self.base_lrs]
+
+   def step(self, epoch=None):
+       if self._finished and self._after_scheduler:
+           if epoch is None:
+               self._after_scheduler.step(None)
+           else:
+               self._after_scheduler.step(epoch - self._total_epoch)
+           self._last_lr = self._after_scheduler.get_last_lr()
+       else:
+           return super(ConstantWarmupScheduler, self).step(epoch)
+
+#!/usr/bin/env
+from typing import Callable
+from pyhocon import ConfigFactory
+from data.dataset_generator import generate_dataset_binary, generate_dataset_multi
+from models.algorithms import algorithms
+
+
+def app_pipeline(path_to_config, pipeline_fn: Callable, path_to_ckpt=None):
+   """
+   Execute application pipeline according to config file
+   :param path_to_config: path to configuration file
+   :param pipeline_fn: function to execute in pipeline
+   :param path_to_ckpt: path to predefined model (optional)
+   """
+   data_conf, model_conf, preproc_conf, train_conf = prepare_config(path_to_config)
+
+   if 'generated' in data_conf:
+       train_conf.put('train_data', data_conf.get_string('generated.train_data'))
+       train_conf.put('eval_data', data_conf.get_string('generated.eval_data'))
+   else:
+       if 'cough_char' not in data_conf:
+           train_output, eval_output = generate_dataset_binary(data_conf)
+       else:
+           train_output, eval_output = generate_dataset_multi(data_conf)
+       train_conf.put('train_data', train_output)
+       train_conf.put('eval_data', eval_output)
+
+   train_conf.put('input_shape', model_conf.get_list('args.input_shape'))
+   train_conf.put('model_name', model_conf.get_string('name'))
+   train_conf.put('num_classes', model_conf.get_int('args.num_classes'))
+   if path_to_ckpt:
+       train_conf.put('model', path_to_ckpt)
+   model = algorithms.get(model_conf.get_string('name'))(**model_conf['args'])
+
+   pipeline_fn(train_conf, model)
+
+
+def prepare_config(path):
+   """
+   Read config file
+   :param path: path to config file
+   :return tuple with configurations for necessary modules
+   """
+   conf = ConfigFactory.parse_file(path)
+   preproc_conf = conf.get_config('preprocessing', None)
+   return conf['data'], conf['model'], preproc_conf, conf['train']
+
+#!/usr/bin/env
+
+class Registry:
+   """
+   The selector/factory class for specified entities group.
+   The name of group passes into constructor and all registered entities
+   belongs to this group.
+   """
+   def __init__(self, name):
+       """
+       Constructor
+       :param name: name of the group
+       """
+       self._name = name
+       self._register_dict = {}
+
+   def _register(self, name, obj):
+       if name in self._register_dict:
+           raise KeyError(f'{name} is already registered in {self._name}')
+       self._register_dict[name] = obj
+
+   def register(self, name):
+       """
+       Registries class definition, should be used as decorator in class definition
+       :param name: name under which class should be saved
+       :return redecorated function
+       """
+       def wrap(obj):
+           self._register(name, obj)
+           return obj
+       return wrap
+
+   def get(self, name):
+       """
+       Get instance of the class by name
+       :param name: name of the entity to take
+       :return instance of the class by name
+       """
+       return self._register_dict[name]
+
+#!/usr/bin/env
+from typing import Callable
+import torch
+from torch.utils.data import Dataset
+import numpy as np
+from data.data_pipeline.utils import process_rec, process_torch
+
+
+class BaseDataset(Dataset):
+   """
+   This dataset subclass is used for reading data records
+   and passing it to corresponding models in specified shape
+   """
+   def __init__(self, path, preproc_fn: Callable = None):
+       """
+       Constructor
+       :param path: path to dataset file (.npy)
+       :param preproc_fn: preprocessing function. Should return new data and new shape. (optional)
+       """
+       self._data = np.load(path, allow_pickle=True)
+       self._preproc_fn = preproc_fn
+
+   def __len__(self):
+       return len(self._data)
+
+   def __getitem__(self, idx):
+       return process_rec(idx, self._data, self._preproc_fn)
+
+
+class BaseDatasetTorch(Dataset):
+   """
+   This dataset subclass is used for reading data records
+   and passing it to corresponding models in specified shape
+   """
+
+   def __init__(self, path, preproc_fn: Callable = None, aug_fn: Callable = None):
+       """
+       Constructor
+       :param path: path to dataset file (.npy)
+       :param preproc_fn: preprocessing function. Should return new data and new shape. (optional)
+       :param aug_fn: augmentation function.
+       """
+       self._data = torch.load(path)
+       self._preproc_fn = preproc_fn
+       self._aug_fn = aug_fn
+
+   def __len__(self):
+       return len(self._data)
+
+   def __getitem__(self, idx):
+       return process_torch(idx, self._data, self._preproc_fn, self._aug_fn)
+
+   def pos_items(self):
+       ps = 0
+       for rcd in self._data:
+           if rcd['label']:
+               ps += 1
+       return ps
+
+   def neg_items(self):
+       ng = 0
+       for rcd in self._data:
+           if not rcd['label']:
+               ng += 1
+       return ng
+
+#!/usr/bin/env
+import torch
+import torch.nn.functional as f
+from typing import Callable, Sequence
+import numpy as np
+import cv2 as cv
+
+from models.rnn.base_rnn import BaseRNN
+from models.sequential.base_sequential import BaseSequential
+
+
+def make_sequential_collate_fn(device, seq_elem_size):
+   """
+   Factory function to create collate function for sequential models
+   :param device: PyTorch device entity. This is context for CPU/GPU software environment
+   :param seq_elem_size: size of sequential element
+   :return collate function
+   """
+
+   def collate_fn(batch):
+       """
+       collate function is necessary for processing variable length tensors.
+       It pads missed parts and return padding mask (1 for real data and 0 for padded item).
+       Also this function passes all tensors to device
+       :param batch: Input tensor with labels and data samples
+       :return tuple with labels and batch tensors, padding mask tensor and padding lengths for sequence models
+       """
+
+       # repack labels and batch into separate entities
+       labels = torch.tensor([e[0] for e in batch], dtype=torch.float32).to(device)
+
+       proc_batch = []
+       for _, count in batch:
+           proc = []
+           for data in count:
+               dim = data[0].shape
+               seq_len = max(dim[-1] // seq_elem_size, 1)
+               if len(dim) == 2:
+                   _, w = dim
+                   # pad too small spectrogram
+                   if w < seq_elem_size:
+                       data = f.pad(
+                           input=data,
+                           pad=[0, seq_elem_size - w, 0, 0],
+                           mode='constant',
+                           value=0
+                       )
+                   elif w % seq_elem_size > (seq_elem_size * 0.5):
+                       data = f.pad(
+                           input=data,
+                           pad=[0, seq_elem_size - (w % seq_elem_size), 0, 0],
+                           mode='constant',
+                           value=0
+                       )
+                       seq_len += 1
+
+                   data = data[:, :, 0:seq_len * seq_elem_size]
+
+               data = torch.split(data, seq_elem_size, dim=-1)
+               data = torch.stack(data)
+               proc.append(torch.squeeze(data, dim=1))
+           proc_batch.append(proc)
+       reshaped_batch = [[], [], []]
+       for item in range(len(proc_batch)):
+           for n in range(len(proc_batch[item])):
+               reshaped_batch[n].append(proc_batch[item][n])
+       proc_batch = reshaped_batch[:n + 1]
+
+       # get sequence lengths
+       lengths = []
+       for item in proc_batch:
+           lengths.append([part.shape[0] for part in item])
+       # pad
+       for item in range(len(proc_batch)):
+           proc_batch[item] = torch.nn.utils.rnn.pad_sequence(proc_batch[item]).to(device)
+
+       for item in range(len(lengths)):
+           lengths[item] = torch.tensor(lengths[item], dtype=torch.long).to(device)
+
+       return labels, proc_batch, lengths
+
+   return collate_fn
+
+
+def make_collate_fn(device, model):
+   """
+   Factory function for creating collate function based on model
+   :param device: torch device entity to transfer data on
+   :param model: torch model
+   :return collate function
+   """
+   if issubclass(type(model), (BaseRNN, BaseSequential)):
+       return make_sequential_collate_fn(device, model.shape[-1])
+   return make_simple_collate_fn(device)
+
+
+def make_simple_collate_fn(device):
+   """
+   Factory function to create collate function for pytorch dataloader in case of non recurrent model
+   :param device: PyTorch device entity. This is context for CPU/GPU software environment
+   :return collate function
+   """
+
+   def collate_fn(batch):
+       """
+       collate function is necessary for transferring data into GPU
+       :param batch: Input tensor
+       :return tuple with labels and batch tensors
+       """
+       labels = torch.tensor([e[0] for e in batch], dtype=torch.float32).to(device)
+       batch = torch.stack([e[1] for e in batch]).to(device)
+       return labels, batch
+
+   return collate_fn
+
+
+def make_torch_tensor(collection):
+   """
+   Helper function to make torch torch tensor
+   :param collection: data to make torch tensor from
+   :return torch tensor
+   """
+   if not isinstance(collection, np.ndarray):
+       collection = np.array(collection, dtype=np.float32)
+   return torch.from_numpy(collection).type('torch.FloatTensor')
+
+
+def clip_and_pad_edit(data, target_shape):
+   """
+   Preprocessing function for resizing 2d image by clipping and padding.
+   Function clips too big image and pad it with zero if an image to small.
+   :param data: np array input image
+   :param target_shape: shape to resize the image
+   :return numpy array with resized image
+   """
+   i_h, i_w = data.shape
+   t_h, t_w = target_shape
+   # clip image
+   data = data[0:min(t_h, i_h), 0:min(i_w, t_w)]
+   if data.shape == target_shape:
+       return data
+   # pad image
+   padding = (0, t_h - i_h), (0, t_w - i_w)
+   return np.pad(data, padding, 'constant')
+
+
+def resize(data, target_shape):
+   """
+   Preprocessing function for resizing 2d image by interpolation.
+   :param data: np array input image
+   :param target_shape: shape to resize the image
+   :return numpy array with resized image
+   """
+   return cv.resize(data, dsize=target_shape[::-1], interpolation=cv.INTER_AREA)
+
+
+def process_rec(idx, recs: Sequence, preproc_fn: Callable = None):
+   """
+   Preprocess loaded record and converts it to torch tensor
+   :param idx: index of preprocessed record
+   :param recs: sequence of dicts with sample info
+   :param preproc_fn: preprocessing function (optional)
+   :return 2 torch tensors. The first one with label and the second one with data
+   """
+   rec = dict(recs[idx])
+   batch = []
+   for i in range(len(rec['data'])):
+       batch.append(make_torch_tensor((rec['data'][i])).unsqueeze(dim=0))
+
+   return make_torch_tensor(rec['label']), batch
+
+
+def process_torch(idx, recs: Sequence, preproc_fn: Callable = None, aug_fn: Callable = None):
+   """
+   Preprocess loaded record and converts it to torch tensor
+   :param idx: index of preprocessed record
+   :param recs: sequence of dicts with sample info
+   :param preproc_fn: preprocessing function (optional)
+   :param aug_fn: augmentation function (optional)
+   :return: 2 torch tensors. The first one with label and the second one with data
+   """
+   rec = dict(recs[idx])
+   batch = rec['data']
+   if aug_fn is not None:
+       batch = aug_fn(batch.unsqueeze(0))[0]
+   batch = preproc_fn(batch)
+
+   return make_torch_tensor(rec['label']), batch
+
+
+def make_torch_collate_fn(device, seq_elem_size):
+   """
+   Factory function to create collate function for sequential models
+   :param device: PyTorch device entity. This is context for CPU/GPU software environment
+   :param seq_elem_size: size of sequential element
+   :return collate function
+   """
+
+   def collate_fn(batch):
+       """
+       collate function is necessary for processing variable length tensors.
+       It pads missed parts and return padding mask (1 for real data and 0 for padded item).
+       Also this function passes all tensors to device
+       :param batch: Input tensor with labels and data samples
+       :return tuple with labels and batch tensors, padding mask tensor and padding lengths for sequence models
+       """
+
+       # repack labels and batch into separate entities
+       labels = torch.tensor([e[0] for e in batch], dtype=torch.float32).to(device)
+
+       proc_batch = []
+       for _, data in batch:
+           proc = []
+
+           dim = data.size()
+           seq_len = max(dim[-1] // seq_elem_size, 1)
+           if len(dim) == 3:
+               _, _, w = dim
+               # pad too small spectrogram
+               if w < seq_elem_size:
+                   data = f.pad(
+                       input=data,
+                       pad=[0, seq_elem_size - w, 0, 0],
+                       mode='constant',
+                       value=0
+                   )
+               elif w % seq_elem_size > (seq_elem_size * 0.5):
+                   data = f.pad(
+                       input=data,
+                       pad=[0, seq_elem_size - (w % seq_elem_size), 0, 0],
+                       mode='constant',
+                       value=0
+                   )
+                   seq_len += 1
+
+               data = data[:, :, 0:seq_len * seq_elem_size]
+
+           data = torch.split(data, seq_elem_size, dim=-1)
+           data = torch.stack(data)
+           proc.append(torch.squeeze(data, dim=1))
+           proc_batch.append(proc)
+       reshaped_batch = [[], [], []]
+       for item in range(len(proc_batch)):
+           for n in range(len(proc_batch[item])):
+               reshaped_batch[n].append(proc_batch[item][n])
+       proc_batch = reshaped_batch[:n + 1]
+
+       # get sequence lengths
+       lengths = []
+       for item in proc_batch:
+           lengths.append([part.shape[0] for part in item])
+       # pad
+       for item in range(len(proc_batch)):
+           proc_batch[item] = torch.nn.utils.rnn.pad_sequence(proc_batch[item]).to(device)
+       for item in range(len(lengths)):
+           lengths[item] = torch.tensor(lengths[item], dtype=torch.long).to(device)
+
+       return labels, proc_batch, lengths
+
+   return collate_fn
+
+import warnings
+import librosa
+
+from data.db_utils import load_db_metadata, download_audio_files
+from data.datasets.algorithms import algorithms
+
+
+@algorithms.register('classification')
+def classification_records(config):
+   print('Start data generator script.\n'
+         'Request to database.')
+   db_metadata = load_db_metadata(config)
+   print('Load data from Amazon S3 storage.')
+   metadata = download_audio_files(config, db_metadata)
+   print('Loading is finished.\n'
+         'Reading audio files.')
+   num = int((len(db_metadata[0]) - 2)/3)
+   recs = []
+   arrays = []
+   sources = []
+   for idx, item in enumerate(metadata.items()):
+       s3_key, data = item
+       sources.append(s3_key)
+       if idx % 100 == 0 and idx != 0:
+           print(f'Read {idx} audio files.')
+       # suppress internal librosa lib warning due to .mp3 files opening
+       with warnings.catch_warnings():
+           warnings.simplefilter("ignore")
+           file_path = data['file_path']
+
+           try:
+               track, sr = librosa.load(file_path, sr=44100)
+
+               if data['start'] is not None:
+                   time_steps = []
+                   for i in range(len(data['start'])):
+                       begin = min(int(float(data['start'][i]) * sr), len(track) - 1)
+                       end = min(int(float(data['end'][i]) * sr) - 1, len(track) - 1)
+                       time_steps += list(range(begin, end))
+                   track = track[time_steps]
+               arrays.append(track)
+           except FileNotFoundError:
+               print(f'Fail to load: {file_path}')
+               continue
+           except ValueError:
+               print(f'Corrupted file: {file_path}')
+               continue
+           if 'cough_char' in config and config['cough_char'] == 'intensity':
+               label = int(data['symptomatic']) - 1
+           else:
+               label = 1. if config.get_bool('force_labels', False)\
+                   else data['symptomatic'] not in ['no_covid19', 'none']
+           if (1 + idx) % num == 0:
+               recs.append({'label': label, 'data': arrays, 'source': sources})
+               arrays = []
+               sources = []
+
+   return recs
+import os
+import warnings
+import librosa
+
+from data.datasets.algorithms import algorithms
+
+
+@algorithms.register('detection')
+def detection_records(config):
+   print('Start data generator script.')
+   recs = []
+   dataset_path = config.get_string('cache_data')
+   for root, _, files in os.walk(dataset_path):
+       for name in files:
+           info = f"{os.path.relpath(root, dataset_path)}/{name}"
+           file_path = os.path.join(root, name)
+           with warnings.catch_warnings():
+               warnings.simplefilter("ignore")
+               try:
+                   track, sr = librosa.load(file_path, sr=44100)
+               except FileNotFoundError:
+                   print(f'Fail to load: {file_path}')
+                   continue
+               label = 1. if config.get_string('audio_type') in info else 0.
+               recs.append({'label': label, 'data': track, 'source': info})
+   return recs
+
+#!/usr/bin/env
+from core.registry import Registry
+
+algorithms = Registry('datasets')
+#!/usr/bin/env
+import numpy as np
+from data.utils import compose_aug
+
+
+def augment_train_data(records, samples_per_class=1000):
+   """
+   Balance number of samples per class and adds new samples by augmentation
+   :param records: list of Record class instance with train data
+   :param samples_per_class: number of samples each class should have
+    (this number assumed bigger than any class size)
+   :return bigger list of records
+   """
+
+   labels = {}
+   for idx, rec in enumerate(records):
+       if rec['label'] in labels:
+           labels[rec['label']].append(idx)
+       else:
+           labels[rec['label']] = [idx]
+
+   new_records = []
+   for label, samples in labels.items():
+       # do not generate extra samples for already well sampled class
+       if samples_per_class <= len(samples):
+           continue
+       samples_to_make = samples_per_class - len(samples)
+       for decision in np.random.randint(2, size=samples_to_make):
+           idx = np.random.randint(len(samples), size=1)[0]
+           sample = records[samples[idx]]
+
+           data = []
+           for i in range(len(sample['data'])):
+               data.append(compose_aug(sample['data'][i]))
+
+           new_records.append({'label': label,
+                               'data': data,
+                               'source': sample['source']
+                               })
+
+   return records + new_records
+
+#!/usr/bin/env
+from functools import partial
+from pathlib import Path
+from random import shuffle
+import librosa
+import numpy as np
+
+from data.augmentation import augment_train_data
+from data.utils import remove_file_if_existed
+from data.datasets.algorithms import algorithms
+
+
+def generate_dataset_binary(config):
+
+   dataset_name = algorithms.get(config.get_string('name'))
+
+   records = dataset_name(config)
+
+   shuffle(records)
+   pos = [rec for rec in records if rec['label'] == 1]
+   neg = [rec for rec in records if rec['label'] == 0]
+   print(f'Positive samples: {len(pos)}\n'
+         f'Negative samples: {len(neg)}\n'
+         f'Before Augmentation')
+   eval_records = pos[:int(config.get_int('eval_size') / 2)] + neg[:int(config.get_int('eval_size') / 2)]
+   train_records = pos[int(config.get_int('eval_size') / 2):] + neg[int(config.get_int('eval_size') / 2):]
+   shuffle(eval_records)
+   shuffle(train_records)
+   # augment train data if needed
+   if config.get_bool('balance_classes'):
+       print('Start data augmentation.')
+       if 'spectrogram' not in config:
+           raise NotImplementedError
+       train_records = augment_train_data(
+           train_records,
+           config.get_int('augmentation_size')
+           )
+
+   spectrogram_fns = {'stft': partial(librosa.stft, n_fft=512),
+                      'mfcc': librosa.feature.mfcc,
+                      'mel': librosa.feature.melspectrogram}
+
+   shuffle(train_records)
+
+   for idx in range(len(train_records)):
+       for n in range(len(train_records[idx]['data'])):
+           train_records[idx]['data'][n] = spectrogram_fns[config.get_string('spectrogram')](train_records[idx]['data'][n])
+   for idx in range(len(eval_records)):
+       for n in range(len(eval_records[idx]['data'])):
+           eval_records[idx]['data'][n] = spectrogram_fns[config.get_string('spectrogram')](eval_records[idx]['data'][n])
+
+   train_output = Path(config.output) / 'train.npy'
+   eval_output = Path(config.output) / 'eval.npy'
+   print('Train binary file generation start.')
+   remove_file_if_existed(train_output)
+   np.save(Path(config.output) / 'train.npy', train_records)
+   print('Eval binary file generation start')
+   remove_file_if_existed(eval_output)
+   np.save(eval_output, eval_records)
+
+   print(f'Dataset generation finished. It\'s saved here: {config.output}')
+   return str(train_output), str(eval_output)
+
+
+def generate_dataset_multi(config):
+
+   dataset_name = algorithms.get(config.get_string('name'))
+
+   records = dataset_name(config)
+
+   shuffle(records)
+   if config['cough_char'] == 'intensity':
+       cl1 = [rec for rec in records if rec['label'] == 0]
+       cl2 = [rec for rec in records if rec['label'] == 1]
+       cl3 = [rec for rec in records if rec['label'] == 2]
+
+   print(f'Paroxysmal samples: {len(cl1)} \n'
+         f'Paroxysmal_hacking samples: {len(cl2)} \n'
+         f'Not paroxysmal samples: {len(cl3)}')
+
+   eval_records = cl1[:int(len(cl1) / 7)] + cl2[:int(len(cl2) / 7)] + cl3[:int(len(cl3) / 7)]
+   train_records = cl1[int(len(cl1) / 7):] + cl2[int(len(cl2) / 7):] + cl3[int(len(cl3) / 7):]
+   shuffle(eval_records)
+   shuffle(train_records)
+   # augment train data if needed
+   if config.get_bool('balance_classes'):
+       print('Start data augmentation.')
+       if 'spectrogram' not in config:
+           raise NotImplementedError
+       train_records = augment_train_data(
+           train_records,
+           config.get_int('augmentation_size')
+           )
+
+   spectrogram_fns = {'stft': partial(librosa.stft, n_fft=512),
+                      'mfcc': librosa.feature.mfcc,
+                      'mel': librosa.feature.melspectrogram}
+
+   shuffle(train_records)
+
+   for idx in range(len(train_records)):
+       for n in range(len(train_records[idx]['data'])):
+           train_records[idx]['data'][n] = spectrogram_fns[config.get_string('spectrogram')](train_records[idx]['data'][n])
+   for idx in range(len(eval_records)):
+       for n in range(len(eval_records[idx]['data'])):
+           eval_records[idx]['data'][n] = spectrogram_fns[config.get_string('spectrogram')](eval_records[idx]['data'][n])
+
+   train_output = Path(config.output) / 'train.npy'
+   eval_output = Path(config.output) / 'eval.npy'
+   print('Train binary file generation start.')
+   remove_file_if_existed(train_output)
+   np.save(Path(config.output) / 'train.npy', train_records)
+   print('Eval binary file generation start')
+   remove_file_if_existed(eval_output)
+   np.save(eval_output, eval_records)
+
+   print(f'Dataset generation finished. It\'s saved here: {config.output}')
+   return str(train_output), str(eval_output)
+
+#!/usr/bin/env
+import os
+import json
+
+import boto3
+from botocore.exceptions import ClientError
+from sshtunnel import SSHTunnelForwarder
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool
+
+
+S3_PREFIX = 's3://'
+TMP_WORK_DIR = '/tmp/acoustery'
+USER = 'ml'
+PASSWORD = '=7RtQIO-^zys'
+SSH_USERNAME = 'tunnel'
+SSH_IP = '18.158.151.87'
+SSH_PORT = 22
+STORAGE_BIND_ADDRESS = 'acousterydb.c8qssl9yutix.eu-central-1.rds.amazonaws.com'
+AWS_ACCESS_KEY = 'AKIA2AXFKPT2CK6J4JSR'
+AWS_SECRET_ACCESS_KEY = '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'
+BUCKET_NAME = 'acoustery'
+
+
+def get_engine_for_port(port):
+   return create_engine('postgresql://{user}:{password}@{host}:{port}/{db}'.format(
+       user=USER,
+       password=PASSWORD,
+       host='127.0.0.1',
+       port=port,
+       db='acoustery_db'
+   ), poolclass=NullPool)
+
+
+def ssh_forwarder(conf):
+   return SSHTunnelForwarder(
+               (SSH_IP, SSH_PORT),
+               ssh_username=SSH_USERNAME,
+               ssh_pkey=conf.permission_key,
+               ssh_private_key_password='',
+               remote_bind_address=(STORAGE_BIND_ADDRESS, 5432)
+   )
+
+
+def load_db_metadata(config):
+   """
+   Loads train and eval metadata from database. Which type of data to load specified inf config file
+   :param config: add dict or pyhocon config object
+   :return list with metadata
+   """
+   request = f"""
+           with mytable as (
+               select
+                   audio.audio_path as path,
+                   audio.samplerate as samplerate,
+                   covid19.symptomatic_type as symptomatic,
+                   types.audio_type,
+                   audio.is_representative,
+                   audio.is_representative_scientist,
+                   users.login as data_source,
+                   req.doctor_status_id,
+                   req.marking_status_id,
+                   cough_char.commentary,
+                   audio.is_marked,
+                   req.user_id as uid,
+                   req.date_created as date
+               from dataset_audio_info as audio
+               join dataset_cough_characteristics as cough_char
+                   on audio.request_id = cough_char.request_id
+               join dataset_request as req
+                   on audio.request_id = req.id
+               join dataset_patient_diseases as patient
+                   on req.id = patient.request_id
+               join covid19_symptomatic_types as covid19
+                   on covid19.id = patient.covid19_symptomatic_type_id
+               join dataset_audio_types as types
+                   on types.id = audio.audio_type_id
+               join users
+                   on users.id = req.user_id
+           ),
+           episodes as (
+               select
+                   audio.audio_path as audio_path,
+                   array_agg(episodes."start" order by episodes."start") as "start",
+                   array_agg(episodes."end" order by episodes."end") as "end"
+               from dataset_audio_info audio
+               join dataset_audio_espisodes episodes
+                   on episodes.audio_info_id = audio.id
+               group by audio.audio_path
+           )
+
+           select
+               path,
+               samplerate,
+               "start",
+               "end",
+               symptomatic
+           from mytable
+           left join episodes on mytable.path = episodes.audio_path
+           where mytable.audio_type = 'cough'
+                   and mytable.data_source not in {config['now_downloadable']}
+                   and mytable.is_representative_scientist = 'true'
+                   ;
+           """
+   request_ids = """
+       with counttable as (select request_id,count(audio_type_id) from (
+       select
+           dataset_audio_info.request_id,
+           audio_type_id,
+           is_representative,
+           is_marked,
+           dataset_patient_diseases.covid19_symptomatic_type_id,
+           dataset_patient_diseases.disease_type_id,
+           dataset_request.marking_status_id,
+           dataset_cough_characteristics.commentary
+       from dataset_audio_info
+   join dataset_patient_diseases
+       on dataset_audio_info.request_id = dataset_patient_diseases.request_id
+   join dataset_cough_characteristics
+       on dataset_audio_info.request_id = dataset_cough_characteristics.request_id
+   join dataset_request
+       on dataset_audio_info.request_id = dataset_request.id) as mytable
+   where (audio_type_id = 1 and mytable.is_marked = 'true' and mytable.is_representative = 'true')
+       or (audio_type_id = 2 and ((mytable.is_marked = 'true' and mytable.is_representative = 'true') or mytable.commentary LIKE '%#is_repr%'))
+   group by request_id)
+   select request_id from counttable
+   where count = 2
+   order by request_id
+  
+   """
+
+   table = f"""
+       with mytable as (
+           select
+               audio.request_id as reqq_id,
+               audio.audio_path as path,
+               audio.samplerate as samplerate,
+               covid19.symptomatic_type as symptomatic,
+               types.audio_type,
+               audio.is_representative,
+               users.login as data_source,
+               req.doctor_status_id,
+               req.marking_status_id,
+               cough_char.commentary,
+               audio.is_marked,
+               req.user_id as uid,
+               req.date_created as date
+           from dataset_audio_info as audio
+           join dataset_cough_characteristics as cough_char
+               on audio.request_id = cough_char.request_id
+           join dataset_request as req
+               on audio.request_id = req.id
+           join dataset_patient_diseases as patient
+               on req.id = patient.request_id
+           join covid19_symptomatic_types as covid19
+               on covid19.id = patient.covid19_symptomatic_type_id
+           join dataset_audio_types as types
+               on types.id = audio.audio_type_id
+           join users
+               on users.id = req.user_id
+       ),
+       episodes as (
+           select
+               audio.audio_path as audio_path,
+               array_agg(episodes."start" order by episodes."start") as "start",
+               array_agg(episodes."end" order by episodes."end") as "end"
+           from dataset_audio_info audio
+           join dataset_audio_espisodes episodes
+               on episodes.audio_info_id = audio.id
+           group by audio.audio_path
+       )
+
+       select
+           reqq_id,
+           date,
+           path,
+           samplerate,
+           "start",
+           "end",
+           symptomatic
+       from mytable
+       left join episodes on mytable.path = episodes.audio_path
+       where mytable.uid > 40
+          
+           and mytable.audio_type=
+       """
+
+   cough_and_breath_sql_request = f"""
+       create view cough as ({table}'cough');
+       create view breath as ({table}'breathing'); 
+       create view request_ids as ({request_ids});
+      
+               select
+           cough.path,
+           breath.path,
+           cough.samplerate,
+           cough."start",
+           cough."end",
+           breath."start",
+           breath."end",
+           cough.symptomatic,
+           cough.reqq_id
+       from
+           cough,
+           breath
+       where
+           cough.date = breath.date
+           and exists (select * from request_ids where request_id = cough.reqq_id)
+       ;
+    
+   """
+
+   with ssh_forwarder(config) as tunnel:
+       tunnel.start()
+       engine = get_engine_for_port(tunnel.local_bind_port)
+       session = sessionmaker(bind=engine)()
+       req = cough_and_breath_sql_request if config.audio_type == 'cough_and_breath' \
+           else request
+       db_info = session.execute(req).fetchall()
+       session.close()
+       return [tuple(item) for item in db_info if item[-1] != 'likely_covid19']
+
+
+def get_s3_key(path: str, bucket: str):
+   pref = f'{S3_PREFIX}{bucket}/'
+   pref_start = path.find(pref, 0)
+   if pref_start != 0:
+       return None
+   return path[len(pref):]
+
+
+def create_bucket():
+   aws_session = boto3.Session(
+       aws_access_key_id=AWS_ACCESS_KEY,
+       aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
+       region_name='eu-central-1'
+   )
+
+   s3 = aws_session.resource('s3')
+
+   return s3.Bucket(BUCKET_NAME)
+
+
+def download_audio_files(config, metadata):
+   """
+   Download audio files from S3 storage
+   :param config: add dict or pyhocon config object
+   :param metadata: list with audio file names in S3 storage and additional data
+   :return dict with audio names as key and file metadata as value
+   """
+
+   bucket = create_bucket()
+
+   out_desc, dictionary = {}, {0: "cough", 1: "breathing"}
+   # make temp directory for swamp files os use existing
+   if 'cache_data' in config:
+       work_dir = config.cache_data
+       if os.path.isfile(f'{work_dir}/metadata.json'):
+           with open(f'{work_dir}/metadata.json') as json_file:
+               out_desc = json.load(json_file)
+   else:
+       work_dir = TMP_WORK_DIR
+
+   if config.audio_type == 'cough_and_breath':
+       for type_val in dictionary.values():
+           if not os.path.isdir(f'{work_dir}/{type_val}'):
+               os.makedirs(f'{work_dir}/{type_val}')
+   else:
+       if not os.path.isdir(work_dir):
+           os.makedirs(work_dir)
+
+   req_desc = {}
+
+   def find_or_load(a_type, f_dir, a_name, sr, start, end, sympt, double=False):
+       work_directory = f'{work_dir}/{a_type}' if double else f'{work_dir}'
+       f_num = len(os.listdir(work_directory))
+       f_name = f'{f_dir}/db_file_{f_num}.wav'
+       s3_key = get_s3_key(a_name, BUCKET_NAME)
+       try:
+           info = {'audio_type': a_type,
+                   'sr': sr,
+                   'start': start,
+                   'end': end,
+                   'symptomatic': sympt,
+                   }
+           if s3_key not in out_desc or\
+                   not info.items() <= out_desc[s3_key].items():
+               with open(f_name, 'wb') as f:
+                   bucket.download_fileobj(s3_key, f)
+               out_desc[s3_key] = info
+               out_desc[s3_key]['file_path'] = f_name
+           req_desc[s3_key] = info
+           req_desc[s3_key]['file_path'] = out_desc[s3_key]['file_path']
+       except ClientError:
+           print(f'Audio file {s3_key} was not found in AWS bucket.')
+           os.remove(f_name)
+
+   for idx, db_item in enumerate(metadata):
+       if idx % 100 == 0 and idx != 0:
+           print(f'Loaded {idx} audio files.')
+       if config.audio_type == 'cough_and_breath':
+           for key, val in dictionary.items():
+               # download audio track from S3 only in case there's no local version
+               if val == 'cough':
+                   find_or_load(val, f'{work_dir}/{val}', db_item[key], db_item[2], db_item[3], db_item[4], db_item[7], double=True)
+               elif val == 'breathing':
+                   find_or_load(val, f'{work_dir}/{val}', db_item[key], db_item[2], db_item[5], db_item[6], db_item[7], double=True)
+       else:
+           find_or_load(config.audio_type, f'{work_dir}', *db_item)
+
+   # save dataset metadata in json file
+   with open(f'{work_dir}/metadata.json', 'w') as json_file:
+       json.dump(out_desc, json_file)
+
+   return req_desc
+
+#!/usr/bin/env
+import os
+import numpy as np
+from audiomentations import Compose, AddGaussianNoise, TimeStretch, Shift
+from tabulate import tabulate as tb
+from sqlalchemy.orm import sessionmaker
+from botocore.exceptions import ClientError
+
+from data.db_utils import get_engine_for_port,\
+                         create_bucket,\
+                         ssh_forwarder,\
+                         get_s3_key,\
+                         BUCKET_NAME
+
+
+def add_white_noise(mel_spec, noise_factor=.005):
+   """
+   Applies white noise to spectrogram for data augmentation
+   :param mel_spec: np array with mel spectrogram
+   :param noise_factor: scale factor for noise amplitude
+   :return spectrogram with noised image
+   """
+   noise = np.random.random(mel_spec.shape)
+   return (mel_spec + noise_factor * noise).astype(np.float32)
+
+
+def spectrogram_emda(mel_spec1, mel_spec2, alpha=0.5):
+   """
+   Compute averaging sum between two spectrogram.
+   If one spectrogram is shorter than another the part of the
+   second one will be used for this time domain.
+   Frequency domain should be the same for both spectrogram.
+   :param mel_spec1: np array with mel spectrogram
+   :param mel_spec2: np array with mel spectrogram
+   :param alpha: float between (0, 1) with convex sum factor
+   :return mixed spectrogram
+   """
+   w1, w2 = mel_spec1.shape[1], mel_spec2.shape[1]
+   w = min(w1, w2)
+
+   res = np.zeros((mel_spec1.shape[0], max(w1, w2)), dtype=np.float32)
+   res[:, 0:w] = alpha * mel_spec1[:, 0:w] + (1. - alpha) * mel_spec2[:, 0:w]
+
+   if w1 < w2:
+       res[:, w1:] = mel_spec2[:, w1:]
+   elif w1 > w2:
+       res[:, w2:] = mel_spec1[:, w2:]
+
+   return res.astype(np.float32)
+
+
+def remove_file_if_existed(path):
+   """
+   Helper function to remove existing files or do nothing if it doesn't exist
+   :param path: path to file
+   """
+   if not os.path.isfile(path):
+       return
+   try:
+       os.remove(path)
+       print(f'File {path} was deleted')
+   except OSError:
+       pass
+
+
+def compose_aug(arr):
+   augment = Compose([
+       AddGaussianNoise(min_amplitude=0.001, max_amplitude=0.015, p=0.5),
+       TimeStretch(min_rate=0.85, max_rate=1.15, p=0.5),
+       Shift(min_fraction=-0.5, max_fraction=0.5, p=0.5),
+   ])
+   augmented_sample = augment(samples=arr, sample_rate=44100)
+
+   return augmented_sample
+
+
+def metric_request(keys):
+   return f"""
+       select
+           audio.audio_path,
+           m_status.marking_status,
+           d_status.marking_status,
+           audio.is_representative,
+           users.login as data_source,
+           cough_char.commentary,
+           covid19.symptomatic_type,
+           audio.samplerate
+       from dataset_audio_info as audio
+       join dataset_cough_characteristics as cough_char
+           on audio.request_id = cough_char.request_id
+       join dataset_request as req
+           on audio.request_id = req.id
+       join dataset_patient_diseases as patient
+           on req.id = patient.request_id
+       join covid19_symptomatic_types as covid19
+           on covid19.id = patient.covid19_symptomatic_type_id
+       join dataset_audio_types as types
+           on types.id = audio.audio_type_id
+       join dataset_marking_status as m_status
+           on m_status.id = req.marking_status_id
+       join dataset_marking_status as d_status
+           on d_status.id = req.doctor_status_id
+       join users
+           on users.id = req.user_id
+       where audio.audio_path in ({", ".join(keys)})
+   """
+
+
+def make_meta_table(db, e_data, meta_confusion_types, download):
+   meta_table = []
+   headers = ['audio path', 'metric', 'marking\nstatus', 'doctor\nstatus', 'represent',
+              'data\nsource', 'commentary', 'symptomatic\ntype', 'samplerate']
+
+   if download is not None:
+       print('Load data from Amazon S3 storage.')
+       for confusion_types in meta_confusion_types:
+           if not os.path.isdir(f'{download}/{confusion_types}'):
+               os.makedirs(f'{download}/{confusion_types}')
+
+   for idx, data in enumerate(e_data):
+       if data[1] in meta_confusion_types:
+           meta = list(db[idx])
+           meta.insert(1, data[1])
+           meta_table.append(meta)
+           if download is not None:
+               try:
+                   filename = os.path.basename(meta[0])
+                   filename = f'{download}/{data[1]}/{idx}_{meta[5]}_{filename}'
+                   download_audio_from_metric(filename, meta[0])
+               except ClientError:
+                   print(f'Audio file {meta[0]} was not found in AWS bucket.')
+                   os.remove(filename)
+
+   return tb(meta_table, headers=headers, tablefmt="fancy_grid")
+
+
+def generate_classification_metric(config, keys, uncertainties, confusion_types=None, download=None):
+   with ssh_forwarder(config) as tunnel:
+       tunnel.start()
+       engine = get_engine_for_port(tunnel.local_bind_port)
+       session = sessionmaker(bind=engine)()
+       db_info = session.execute(metric_request(keys)).fetchall()
+       session.close()
+
+   source = [f"'s3://acoustery/{s3}'" for s3 in keys]
+   eval_data = [list(tup) for tup in zip(source, uncertainties)]
+   eval_data.sort()
+   db_info.sort()
+
+   if confusion_types is not None:
+       return make_meta_table(db_info, eval_data, confusion_types, download)
+   return make_source_table(db_info, eval_data)
+
+
+def make_source_table(db, e_data):
+   cm_table = [['tp', 'tn', 'fp', 'fn']]
+   headers = ['confusion matrix']
+   confusion_matrix = {'tp': 0, 'tn': 1, 'fp': 2, 'fn': 3}
+
+   for idx, data in enumerate(e_data):
+       meta = list(db[idx])
+       if meta[4] not in headers:
+           headers.append(meta[4])
+           cm_table.append([0] * 4)
+       cm_table[headers.index(meta[4])][confusion_matrix[data[1]]] += 1
+   headers.append('total')
+   cm_table.append(np.array(cm_table[1:]).sum(axis=0).tolist())
+   return tb(np.array(cm_table).T.tolist(), headers=headers, tablefmt="fancy_grid")
+
+
+def generate_detection_metric(keys, uncertainties, meta_confusion_types):
+   cm_table = [['tp', 'tn', 'fp', 'fn']]
+   headers = ['confusion matrix']
+   confusion_matrix = {'tp': 0, 'tn': 1, 'fp': 2, 'fn': 3}
+
+   e_data = [list(tup) for tup in zip(keys, uncertainties)]
+
+   for path, key in e_data:
+       if key in meta_confusion_types:
+           parent_dir = lambda path: os.path.abspath(os.path.join(path, os.pardir))
+           if parent_dir(path) not in headers:
+               headers.append(parent_dir(path))
+               cm_table.append([0] * 4)
+           cm_table[headers.index(parent_dir(path))][confusion_matrix[key]] += 1
+           print(path)
+   headers.append('total')
+   cm_table.append(np.array(cm_table[1:]).sum(axis=0).tolist())
+
+   return tb(np.array(cm_table).T.tolist(), headers=headers, tablefmt="fancy_grid")
+
+
+def download_audio_from_metric(filename, path):
+   s3_key = get_s3_key(path, BUCKET_NAME)
+   bucket = create_bucket()
+
+   with open(filename, 'wb') as f:
+       bucket.download_fileobj(s3_key, f)
+
+#!/usr/bin/env
+import torch
+from metrics.metric import Metric
+
+
+class AccuracyMetric(Metric):
+   """
+   Implementation of simple accuracy metric
+   """
+   def __init__(self):
+       super(AccuracyMetric, self).__init__()
+       self._total_elements = 0
+       self._total_td = None
+
+   def update(self, pred, target):
+       if self._total_td is None:
+           self._total_td = (target == pred).sum()
+       else:
+           self._total_td += (target == pred).sum()
+       self._total_elements += len(pred) if pred.dim() > 0 else 1
+
+   def flush(self):
+       self._total_td, self._total_elements = None, 0
+
+   def compute(self):
+       print(f'Accuracy: {torch.true_divide(self._total_td, self._total_elements)}')
+       return torch.true_divide(self._total_td, self._total_elements)
+
+#!/usr/bin/env
+from metrics.metric import Metric
+
+
+class ConfusionMetric(Metric):
+   """
+   Implementation of f1 metric
+   """
+
+   def __init__(self):
+       super(ConfusionMetric, self).__init__()
+       self._list = []
+
+   def update(self, pred, target):
+       pred = pred.cpu().numpy()
+       target = target.cpu().numpy()
+
+       matrix = {2: 'tp', 0: 'tn', 1: 'fp', -1: 'fn'}
+       for idx in range(len(pred)):
+           sum_pt, sub_pt = pred[idx] + target[idx], pred[idx] - target[idx]
+           self._list.append(matrix[sum_pt if sum_pt == 2 or 0 else sub_pt])
+
+   def flush(self):
+       self._list = []
+
+   def compute(self):
+       return self._list
+
+#!/usr/bin/env
+import torch
+from metrics.metric import Metric
+
+
+class F1Measure(Metric):
+   """
+   Implementation of f1 metric
+   """
+
+   def __init__(self):
+       super(F1Measure, self).__init__()
+       self._tp, self._fp, self._fn, self._tn = 0, 0, 0, 0
+
+   def update(self, pred, target):
+       self._tp += (target + pred == 2).sum()
+       self._fp += (pred - target == 1).sum()
+       self._fn += (pred - target == -1).sum()
+       self._tn += (target + pred == 0).sum()
+
+   def flush(self):
+       self._tp, self._fp, self._fn = 0, 0, 0
+
+   def compute(self):
+       print(f'TP {self._tp}', f'FP {self._fp}')
+       print(f'FN {self._fn}', f'TN {self._tn}')
+       print(f'Recall: {torch.true_divide(self._tp, (self._tp + self._fn))}')
+       print(f'Precision: {torch.true_divide(self._tp, (self._tp + self._fp))}')
+       print(f'Specificity: {torch.true_divide(self._tn, (self._tn + self._fp))} ')
+       print(f'F1 measure: {torch.true_divide(self._tp, self._tp + .5 * (self._fp + self._fn))}')
+       return torch.true_divide(self._tp, self._tp + .5 * (self._fp + self._fn))
+
+#!/usr/bin/env
+from abc import abstractmethod
+
+
+class Metric:
+   """
+   Base class for metrics in this framework
+   """
+   def __init__(self):
+       pass
+
+   @abstractmethod
+   def update(self, preds, targets):
+       """
+       Updates metric for every batch.
+       :param preds: tensor with predicted values
+       :param targets: tensor with ground truth labels
+       """
+       raise NotImplemented
+
+   @abstractmethod
+   def compute(self):
+       """
+       Compute metric for current state
+       :return metric value
+       """
+       raise NotImplemented
+
+   @abstractmethod
+   def flush(self):
+       """
+       Flush all metrics values to reuse instance of this class.
+       It is useful in training stage.
+       """
+       raise NotImplemented
+
+#!/usr/bin/env
+from abc import abstractmethod
+import torch.nn as nn
+from models.modules import CNNBlock
+
+from models.algorithms import algorithms
+
+
+@algorithms.register('base_cnn')
+class BaseCNN(nn.Module):
+
+   def __init__(self, shape, dropout_pb=.0, ret_features=False):
+       """
+       Constructor
+       :param shape: tuple with input shape
+       :param dropout_pb: dropout rate
+       :param ret_features: flag to return CNN features instead probability
+       """
+       super(BaseCNN, self).__init__()
+       h, w = shape
+
+       # first block
+       channels_num = 32
+       self._in_block = nn.Sequential(
+           nn.Conv2d(1, channels_num, kernel_size=3, padding=1, padding_mode='circular'),
+           nn.ReLU(),
+           nn.Dropout(dropout_pb),
+           nn.BatchNorm2d(channels_num),
+           nn.MaxPool2d(kernel_size=2)
+       )
+
+       modules = []
+       count = 1
+       while channels_num < 256:
+           modules.append(CNNBlock(channels_num,
+                                   2 * channels_num,
+                                   int(h * (0.5 ** count)),
+                                   int(w * (0.5 ** count)),
+                                   dropout_pb * (0.5 ** count)))
+           channels_num *= 2
+           count += 1
+
+       self._main_block = nn.Sequential(*modules)
+
+       dim_scale_factor = 2 ** (len(modules) + 1)
+
+       if ret_features:
+           self._head = None
+           self._out_dims = (h // dim_scale_factor, w // dim_scale_factor, channels_num)
+       else:
+           self._out_dims = 1
+           self._head = nn.Sequential(
+               nn.Conv2d(channels_num, 1, kernel_size=3, padding=1, padding_mode='circular'),
+               nn.AvgPool2d(kernel_size=(h // dim_scale_factor, w // dim_scale_factor)),
+               nn.Sigmoid()
+           )
+
+   @abstractmethod
+   def forward(self, batch):
+       batch = self._in_block(batch)
+       batch = self._main_block(batch)
+       return self._head(batch) if self._head else batch
+
+   @property
+   def out_dims(self):
+       return self._out_dims
+
+#!/usr/bin/env
+from abc import abstractmethod
+import torch.nn as nn
+import torchvision.models as models
+
+from models.algorithms import algorithms
+
+
+@algorithms.register('audio_mobilenet')
+class AudioMobileNet(nn.Module):
+   """
+   Modified for audio recognition pretrained on ImageNet MobileNet v2 model
+   """
+   def __init__(self):
+       super(AudioMobileNet, self).__init__()
+       # this stage is needed for adding channels to spectrogram
+       # (mobilenet has 3 input channels)
+       self._prepare_stage = nn.Sequential(
+           nn.Conv2d(1, 3, 3, padding=1, padding_mode='circular'),
+           nn.BatchNorm2d(3),
+           nn.ReLU(),
+           nn.Conv2d(3, 3, 3, padding=1, padding_mode='circular'),
+           nn.BatchNorm2d(3),
+           nn.ReLU(),
+       )
+       self._backbone = models.mobilenet_v2(pretrained=True)
+       # replace mobilenet linear layer with custom layer
+       self._backbone.classifier = nn.Sequential(
+           nn.Linear(1280, 512),
+           nn.ReLU(),
+           nn.Linear(512, 1),
+           nn.Sigmoid()
+       )
+
+   @abstractmethod
+   def forward(self, batch):
+       batch = self._prepare_stage(batch)
+       return self._backbone(batch)
+
+#!/usr/bin/env
+from abc import abstractmethod
+import torch
+import torch.nn as nn
+
+from models.modules import weights_init
+
+
+class TSAttention(nn.Module):
+
+   def __init__(self, shape):
+       super(TSAttention, self).__init__()
+
+       c, h, w = shape
+
+       self._weights = nn.Parameter(torch.Tensor([1/3, 1/3, 1/3]), requires_grad=True)
+
+       self._freq_w = nn.Sequential(
+           nn.Conv2d(c, 1, kernel_size=1, padding_mode='circular'),
+           nn.AvgPool2d(kernel_size=(1, w))
+       ).apply(weights_init)
+
+       self._time_w = nn.Sequential(
+           nn.Conv2d(c, 1, kernel_size=1, padding_mode='circular'),
+           nn.AvgPool2d(kernel_size=(h, 1))
+       ).apply(weights_init)
+
+   @abstractmethod
+   def forward(self, batch):
+       freq_features = self._freq_w(batch) * batch
+       time_features = self._time_w(batch) * batch
+       a, b, c = torch.softmax(self._weights, dim=0)
+       return a * batch + b * freq_features + c * time_features
+
+#!/usr/bin/env
+from abc import abstractmethod
+
+import torch.nn as nn
+from models.cnn.modules import TSAttention
+
+from models.modules import weights_init
+from models.algorithms import algorithms
+
+
+@algorithms.register('tscnn_10')
+class TSCNN(nn.Module):
+
+   name = 'tscnn_10'
+
+   def __init__(self, shape, dropout_pb=.0, ret_features=False):
+       """
+       Constructor
+       :param shape: tuple with input shape
+       :param dropout_pb: dropout rate
+       :param ret_features: flag to return CNN features instead probability
+       """
+       super(TSCNN, self).__init__()
+
+       def make_block(ch, height, width):
+           return nn.Sequential(
+               nn.Conv2d(ch, ch, kernel_size=3, padding=1, padding_mode='circular'),
+               nn.BatchNorm2d(ch),
+               nn.ReLU(),
+               nn.Dropout(dropout_pb),
+               nn.Conv2d(ch, 2 * ch, kernel_size=3, padding=1, padding_mode='circular'),
+               nn.BatchNorm2d(2 * ch),
+               nn.ReLU(),
+               nn.Dropout(dropout_pb),
+               nn.AvgPool2d(2, 2),
+               TSAttention((2 * ch,  height // 2, width // 2))
+           ).apply(weights_init)
+
+       channels_num = 16
+       self._init_conv = nn.Conv2d(
+           1,
+           channels_num,
+           kernel_size=7,
+           padding=3,
+           padding_mode='circular'
+       )
+
+       blocks = []
+       h, w = shape
+       while channels_num < 256:
+           blocks.append(make_block(channels_num, h, w))
+           h, w = h // 2, w // 2
+           channels_num *= 2
+       self._blocks = nn.Sequential(*blocks)
+
+       self._head = nn.Sequential(
+           nn.Conv2d(channels_num // 2, 1, kernel_size=3, padding=1, padding_mode='circular'),
+           nn.AvgPool2d(kernel_size=shape),
+           nn.Sigmoid()
+       )
+
+       self._ret_features = ret_features
+       self._out_dims = h, w, channels_num if ret_features else 1
+
+   @abstractmethod
+   def forward(self, batch):
+       # compute features
+       batch = self._init_conv(batch)
+       features = self._blocks(batch)
+       if self._ret_features:
+           return features
+       return self._head(features)
+
+   @property
+   def out_dims(self):
+       return self._out_dims
+
+from abc import abstractmethod
+import torch.nn as nn
+
+
+class BaseRNN(nn.Module):
+   """
+   Basic interface for all RNN models
+   """
+   def __init__(self, in_shape):
+       super(BaseRNN, self).__init__()
+       self._shape = in_shape
+
+   @abstractmethod
+   def forward(self, batch):
+       raise NotImplementedError
+
+   @property
+   def shape(self) -> tuple:
+       return self._shape
+
+#!/usr/bin/env
+from abc import abstractmethod
+import torch.nn as nn
+
+from models.rnn.modules import CNNEncoderBlock
+
+
+class Encoder(nn.Module):
+   """
+   Base class for feature extraction
+   """
+   def __init__(self, dropout_pb=.15):
+       """
+       Constructor
+       :param dropout_pb: dropout probability rate
+       """
+       super(Encoder, self).__init__()
+       self._dropout_pb = dropout_pb
+
+   @abstractmethod
+   def forward(self, batch):
+       raise NotImplemented
+
+   @abstractmethod
+   def output_shape(self, shape):
+       """
+       Compute encoder output tensor shape due to specified input shape
+       :param shape: shape of feature extractor input tensor
+       """
+       raise NotImplemented
+
+
+class CNNEncoder1d(Encoder):
+
+   def __init__(self, dropout_pb):
+       """
+       Constructor
+       :param dropout_pb: dropout rate
+       """
+       super(CNNEncoder1d, self).__init__()
+       self._out_channels = 32
+       max_pool_ker = 3
+
+       def cnn_encoder_block_1d(in_ch, out_ch):
+           return nn.Sequential(
+               CNNEncoderBlock(1, 4, '1d', dropout_pb),
+               nn.MaxPool1d(kernel_size=max_pool_ker)
+           )
+
+       self._cnn_encoder = nn.Sequential(
+           cnn_encoder_block_1d(1, 4),
+           cnn_encoder_block_1d(4, 8),
+           cnn_encoder_block_1d(8, 16),
+           cnn_encoder_block_1d(16, self._out_channels),
+       )
+
+   @abstractmethod
+   def forward(self, batch):
+       return self._cnn_encoder(batch)
+
+   @abstractmethod
+   def output_shape(self, shape):
+       for _ in range(len(self._cnn_encoder)):
+           # dim squeeze after conv with kernel 3
+           shape = shape - 2
+           # dim squeeze after max polling with kernel 3
+           shape = int((shape - shape % 3) / 3)
+       return self._out_channels, shape
+
+
+class CNNEncoder2d(Encoder):
+
+   def __init__(self, dropout_pb):
+       """
+       Constructor
+       :param dropout_pb: dropout rate
+       """
+       super(CNNEncoder2d, self).__init__()
+       self._out_channels = 32
+       self._cnn_encoder = nn.Sequential(
+           CNNEncoderBlock(1, 8, '2d', dropout_pb),
+           CNNEncoderBlock(8, 16, '2d', dropout_pb),
+           CNNEncoderBlock(16, self._out_channels, '2d', dropout_pb),
+           CNNEncoderBlock(self._out_channels, self._out_channels, '2d', dropout_pb),
+       )
+
+   @abstractmethod
+   def forward(self, batch):
+       return self._cnn_encoder(batch)
+
+   @abstractmethod
+   def output_shape(self, shape):
+       h, w = shape[-2:]
+       dim_diff = 2 * len(self._cnn_encoder)
+       return self._out_channels, h - dim_diff, w - dim_diff
+
+#!/usr/bin/env
+from abc import ABC
+import torch.nn as nn
+
+
+""" Basic NN models building blocks """
+
+
+class CNNEncoderBlock(nn.Module, ABC):
+
+   def __init__(self, in_channels, out_channels, conv_dimension, dropout_pb=0.5):
+       super(CNNEncoderBlock, self).__init__()
+
+       if conv_dimension not in ['1d', '2d']:
+           raise RuntimeError('Unsupported conv type')
+
+       conv_fn = nn.Conv1d if conv_dimension == '1d' else nn.Conv2d
+       batch_norm_fn = nn.BatchNorm1d if conv_dimension == '1d' else nn.BatchNorm2d
+
+       self._conv_block = nn.Sequential(
+           conv_fn(in_channels, out_channels, kernel_size=3),
+           nn.LeakyReLU(),
+           nn.Dropout(dropout_pb),
+           batch_norm_fn(out_channels),
+       ).apply(weights_init)
+
+   def forward(self, batch):
+       return self._conv_block(batch)
+
+
+def weights_init(m):
+   class_name = m.__class__.__name__
+   if class_name.find('Conv') != -1:
+       nn.init.xavier_uniform_(m.weight)
+   elif class_name.find('BatchNorm') != -1:
+       nn.init.normal_(m.weight, 0.0, 0.7)
+       nn.init.normal_(m.bias, 0.0, 0.01)
+
+#!/usr/bin/env
+from abc import abstractmethod
+
+import torch
+import torch.nn as nn
+import numpy as np
+
+from models.algorithms import algorithms
+from models.rnn.encoders import Encoder
+from models.rnn.base_rnn import BaseRNN
+from models.rnn.encoders import CNNEncoder2d, CNNEncoder1d
+from models.modules import Attention
+
+
+class RCNN(BaseRNN):
+   """
+   class for RNNs nets.
+   """
+   def __init__(self, in_shape, encoder: Encoder, attention=True):
+       """
+       Constructor
+       :param in_shape: int or tuple with single item input shape
+       :param encoder: instance of Encoder subclass as feature extractor for LSTM module
+       :param attention: flag to use attention block
+       """
+       super(RCNN, self).__init__(in_shape)
+       # define cnn based encoder
+       max_pool_ker, dropout_pb = 3, 0.7
+       self._encoder = encoder
+
+       lstm_hidden_units_num = 512
+       self._lstm = nn.LSTM(
+           np.prod(encoder.output_shape(in_shape)),
+           lstm_hidden_units_num,
+           1
+       )
+
+       # model head
+       self._logits = nn.Sequential(
+           nn.Linear(lstm_hidden_units_num, 256),
+           nn.ReLU(),
+           nn.Dropout(dropout_pb),
+           nn.Linear(256, 1),
+       )
+
+       self._attention = Attention(lstm_hidden_units_num) if attention else None
+
+   @abstractmethod
+   def forward(self, batch):
+       if isinstance(batch, tuple):
+           assert len(batch) == 2
+           batch, lengths = batch
+       else:
+           lengths = torch.ones(batch.size()[1]) * (-1)
+       time_steps, batch_size, *_ = batch.size()
+       # run cnn feature extractor
+       enc_out = []
+       for ts in range(time_steps):
+           enc_out.append(
+               self._encoder.forward(
+                   torch.unsqueeze(batch[ts], 1)
+               )
+           )
+       enc_out = torch.cat(enc_out)
+       # flatten tensor and reshape it for rnn
+       enc_out = enc_out.view(time_steps, batch_size, -1)
+       # run rnn
+       rnn_out, _ = self._lstm(enc_out)
+
+       if self._attention:
+           rnn_outs = []
+           for idx in range(rnn_out.shape[1]):
+               output = rnn_out[:, idx, :]
+               output = self._attention(output[:int(lengths[idx]), :])
+               rnn_outs.append(output)
+           return torch.sigmoid(self._logits(torch.stack(rnn_outs)))
+
+       # get last valued lstm output
+       rnn_last_out = []
+       for idx in range(rnn_out.shape[1]):
+           output = rnn_out[:, idx, :]
+           rnn_last_out.append(output[int(lengths[idx]) - 1].unsqueeze(0))
+       rnn_last_out = torch.cat(rnn_last_out)
+       return torch.sigmoid(self._logits(rnn_last_out))
+
+
+@algorithms.register('rcnn_2d')
+class RCNN2d(BaseRNN):
+
+   name = 'rcnn_2d'
+
+   def __init__(self, **args):
+       super(RCNN2d, self).__init__(args['input_shape'])
+        self._rcnn = RCNN(args['input_shape'], CNNEncoder2d(args['dropout_rate']))
+
+   @abstractmethod
+   def forward(self, batch):
+       return self._rcnn(batch)
+
+
+@algorithms.register('rcnn_1d')
+class RCNN1d(BaseRNN):
+
+   name = 'rcnn_1d'
+
+   def __init__(self, **args):
+       super(RCNN1d, self).__init__(args['input_shape'])
+       self._rcnn = RCNN(args['input_shape'], CNNEncoder1d(args['dropout_rate']))
+
+   @abstractmethod
+   def forward(self, batch):
+       return self._rcnn(batch)
+
+#!/usr/bin/env
+from abc import abstractmethod
+
+import torch
+import torch.nn as nn
+import numpy as np
+from models.sequential.base_sequential import BaseSequential
+from models.modules import Attention
+from models.cnn.base_cnn import BaseCNN
+from models.cnn.ts_cnn10 import TSCNN
+from models.algorithms import algorithms
+
+
+class BaseAttentionCNN(nn.Module):
+
+   def __init__(self, encoder, input_shape, num_classes, dropout_rate=.0):
+       """
+       Constructor
+       :param encoder: torch module with cnn encoder to extract features
+       :param input_shape: int or tuple with single item shape
+       :param dropout_rate: float in range [0:1) with dropout rate
+       """
+       super(BaseAttentionCNN, self).__init__()
+       self._shape = input_shape
+       self._encoder = encoder
+       self._num_classes = num_classes
+       encoder_out_size = int(np.prod(self._encoder.out_dims))
+       self._attention = Attention(encoder_out_size)
+
+       # model head
+       self._logits = nn.Sequential(
+           nn.Linear(encoder_out_size, 256),
+           nn.ReLU(),
+           nn.Dropout(dropout_rate),
+           nn.Linear(256, num_classes),
+       )
+
+   @abstractmethod
+   def forward(self, batch):
+
+       if isinstance(batch, tuple):
+           assert len(batch) == 2
+           batch, lengths = batch
+       else:
+           lengths = torch.tensor([batch[0].size(0)])
+
+       time_steps, batch_size, h, w = batch[0].size()
+       # run cnn feature extractor
+       enc_in = batch[0].view(time_steps*batch_size, 1, h, w)
+       enc_out = self._encoder.forward(enc_in)
+       enc_out = enc_out.view(time_steps, batch_size, -1)
+
+       attention_values = []
+       for idx in range(enc_out.shape[1]):
+           output = enc_out[:, idx, :]
+           attention_val = self._attention(output[:int(lengths[0][idx]), :])
+           attention_values.append(attention_val)
+       attention_values = torch.stack(attention_values)
+       if self._num_classes == 1:
+           return torch.sigmoid(self._logits(attention_values))
+       else:
+           return self._logits(attention_values)
+
+
+@algorithms.register('attention_cnn')
+class AttentionCNN(BaseSequential):
+
+   name = 'attention_cnn'
+
+   def __init__(self, input_shape, num_classes, dropout_rate=.0):
+       super(AttentionCNN, self).__init__(input_shape)
+
+       self._net = BaseAttentionCNN(
+           BaseCNN(input_shape, dropout_rate, ret_features=True),
+           input_shape,
+           num_classes,
+           dropout_rate
+       )
+
+   @abstractmethod
+   def forward(self, batch):
+       return self._net(batch)
+
+
+@algorithms.register('attention_tscnn')
+class AttentionTSCNN(BaseSequential):
+
+   name = 'attention_tscnn'
+
+   def __init__(self, input_shape, num_classes, dropout_rate=.0):
+       super(AttentionTSCNN, self).__init__(input_shape)
+       self._shape = input_shape
+       self._net = BaseAttentionCNN(
+           TSCNN(input_shape, dropout_rate, ret_features=True),
+           input_shape,
+           num_classes,
+           dropout_rate
+       )
+
+   @abstractmethod
+   def forward(self, batch):
+       return self._net(batch)
+
+   @property
+   def shape(self) -> tuple:
+       return self._shape
+
+#!/usr/bin/env
+from abc import abstractmethod
+
+import torch.nn as nn
+
+
+class BaseSequential(nn.Module):
+   """
+   Basic interface for all sequential models
+   """
+   def __init__(self, in_shape):
+       super(BaseSequential, self).__init__()
+       self._shape = in_shape
+
+   @abstractmethod
+   def forward(self, batch):
+       raise NotImplementedError
+
+   @property
+   def shape(self) -> tuple:
+       return self._shape
+
+#!/usr/bin/env
+from abc import abstractmethod
+
+import torch
+import torch.nn as nn
+import numpy as np
+
+from models.sequential.base_sequential import BaseSequential
+from models.modules import Attention
+from models.cnn.base_cnn import BaseCNN
+from models.algorithms import algorithms
+
+class MultiAttentionCNN(nn.Module):
+
+   def __init__(self, encoder_seq, input_shape, dropout_rate=.0):
+       """
+       Constructor
+       :param encoder: torch module with cnn encoder to extract features
+       :param input_shape: int or tuple with single item shape
+       :param dropout_rate: float in range [0:1) with dropout rate
+       """
+       super(MultiAttentionCNN, self).__init__()
+       self._shape = input_shape
+       encoder_out_size = int(np.prod(encoder_seq[0].out_dims))
+
+       for i in range(len(encoder_seq)):
+           setattr(self, f'_encoder_{i}', encoder_seq[i])
+           setattr(self, f'_attention_{i}', Attention(encoder_out_size))
+       # model head
+       self._logits = nn.Sequential(
+           nn.Linear(encoder_out_size * len(encoder_seq), 256 * len(encoder_seq)),
+           nn.ReLU(),
+           nn.Dropout(dropout_rate),
+           nn.Linear(256 * len(encoder_seq), 1),
+       )
+
+   @abstractmethod
+   def forward(self, batch):
+
+       if isinstance(batch, tuple):
+           assert len(batch) == 2
+           data, lengths = batch
+       else:
+           data = batch
+           lengths = []
+           for item in batch:
+               lengths.append(torch.tensor([item.size()[0]]))
+       attention_out = []
+       for i in range(len(data)):
+           time_steps, batch_size, h, w = data[i].size()
+           # run cnn feature extractor
+           enc_in = data[i].view(time_steps*batch_size, 1, h, w)
+           enc_out = getattr(self, f'_encoder_{i}').forward(enc_in)
+           enc_out = enc_out.view(time_steps, batch_size, -1)
+
+           attention_values = []
+           for idx in range(enc_out.shape[1]):
+               output = enc_out[:, idx, :]
+               attention_val = getattr(self, f'_attention_{i}')(output[:int(lengths[i][idx]), :])
+               attention_values.append(attention_val)
+           attention_out.append(torch.stack(attention_values))
+
+       return torch.sigmoid(self._logits(torch.cat(attention_out, dim=1)))
+
+@algorithms.register('attention_cnn_double')
+class Double_AttentionCNN(BaseSequential):
+
+   name = 'attention_cnn_double'
+
+   def __init__(self, input_shape, dropout_rate=.0):
+       super(Double_AttentionCNN, self).__init__(input_shape)
+
+       self._net = MultiAttentionCNN(
+           [BaseCNN(input_shape, dropout_rate, ret_features=True),
+           BaseCNN(input_shape, dropout_rate, ret_features=True)],
+           input_shape,
+           dropout_rate
+       )
+
+   @abstractmethod
+   def forward(self, batch):
+       return self._net(batch)
+
+@algorithms.register('attention_cnn_triple')
+class Triple_AttentionCNN(BaseSequential):
+
+   name = 'attention_cnn_triple'
+
+   def __init__(self, input_shape, dropout_rate=.0):
+       super(Triple_AttentionCNN, self).__init__(input_shape)
+
+       self._net = MultiAttentionCNN(
+           [BaseCNN(input_shape, dropout_rate, ret_features=True),
+           BaseCNN(input_shape, dropout_rate, ret_features=True),
+           BaseCNN(input_shape, dropout_rate, ret_features=True)],
+           input_shape,
+           dropout_rate
+       )
+
+   @abstractmethod
+   def forward(self, batch):
+       return self._net(batch)
+#!/usr/bin/env
+from core.registry import Registry
+
+algorithms = Registry('models')
+
+#!/usr/bin/env
+from abc import abstractmethod
+
+import torch
+import torch.nn as nn
+
+
+class Attention(nn.Module):
+
+   def __init__(self, size):
+       super(Attention, self).__init__()
+       weights = torch.zeros([1, size], dtype=torch.float32, requires_grad=True)
+       self._weights = nn.Parameter(nn.init.xavier_normal_(weights).squeeze(0))
+       self._linear = nn.Linear(size, size)
+
+   @abstractmethod
+   def forward(self, sequence):
+       # compute weights scores
+       activations = torch.tanh(self._linear(sequence))
+       scores = torch.matmul(activations, self._weights)
+       self._attention_weights = torch.softmax(scores, dim=0)
+       return torch.matmul(self._attention_weights, sequence)
+
+   @property
+   def attention_weights(self):
+       return self._attention_weights
+
+
+class CNNBlock(nn.Module):
+   """
+   Basic block for cnn model
+   """
+   def __init__(self, in_ch, out_ch, h, w, dropout_pb=.0):
+       super(CNNBlock, self).__init__()
+
+       self._block = nn.Sequential(
+           nn.Conv2d(in_ch, out_ch, kernel_size=3, padding=1, padding_mode='circular'),
+           nn.BatchNorm2d(out_ch),
+           nn.ReLU(),
+           nn.Dropout(dropout_pb),
+           nn.Conv2d(out_ch, out_ch, kernel_size=3, padding=1, padding_mode='circular'),
+           nn.BatchNorm2d(out_ch),
+           nn.ReLU(),
+           nn.Dropout(dropout_pb),
+           nn.MaxPool2d(kernel_size=2)
+       ).apply(weights_init)
+
+   @abstractmethod
+   def forward(self, batch):
+       return self._block(batch)
+
+
+def weights_init(m):
+   class_name = m.__class__.__name__
+   if class_name.find('Conv') != -1:
+       nn.init.xavier_uniform_(m.weight)
+
+#!/usr/bin/env
+import torch
+from pathlib import Path
+
+from tools.detector.utils import make_cough_series, make_records_for_detector
+from models.algorithms import algorithms
+
+
+WINDOW_STEP = 0.5
+SIGNAL_DURATION = 1
+
+
+def load_model(model_path, model_name='attention_tscnn', shape=(20, 87)):
+   model = algorithms.get(model_name)(shape)
+   model.load_state_dict(torch.load(Path(model_path)))
+   return model
+
+
+def detect_cough(model, track, samplerate):
+   return make_cough_series(model,
+                            make_records_for_detector(track, samplerate, WINDOW_STEP, SIGNAL_DURATION),
+                            samplerate,
+                            SIGNAL_DURATION)
+
+#!/usr/bin/env
+import torch
+from torch.utils.data import DataLoader, Dataset
+import numpy as np
+import librosa
+import os
+from typing import Callable
+
+from data.data_pipeline.utils import make_collate_fn, process_rec
+
+
+def make_records_for_detector(track, sr, window_step, signal_duration):
+   sample_window_step = window_step * sr
+   sample_signal_dur = signal_duration * sr
+
+   start_samples = [int(sample) for sample in np.arange(0, len(track), sample_window_step)
+                    if sample + sample_signal_dur < len(track)]
+
+   tracks = []
+   for start in start_samples:
+       data = librosa.feature.mfcc(track[start:start + sample_signal_dur])
+       tracks.append({'label': 1.0,
+                      'data': [data],
+                      'timing': [start, start + sample_signal_dur]
+                      })
+   return tracks
+
+
+def make_cough_series(model, record, samplerate, signal_duration):
+   series = []
+
+   dataset = DatasetWithoutLoad(data=record)
+   dataloader = DataLoader(dataset, batch_size=1, collate_fn=make_collate_fn(torch.device('cpu'), model))
+   model.eval()
+
+   start_sample, end_sample, counter = 0, 0, 0
+   for idx, batch in enumerate(dataloader):
+       preds = model.forward((batch[1], batch[2]))
+
+       if torch.round(preds) == 1.0:
+           if counter == 0:
+               start_sample = record[idx]['timing'][0]
+           counter += 1
+
+           if idx == len(dataloader) - 1:
+               series.append((start_sample, record[idx]['timing'][1]))
+       elif torch.round(preds) == 0.0:
+           if counter != 0:
+               end_sample = record[idx - 1]['timing'][1]
+               if end_sample - start_sample > samplerate * signal_duration:
+                   series.append((start_sample, end_sample))
+               counter = 0
+
+   return series
+
+
+def save_cough_series(series, file_path, output_path):
+   if not series:
+       return
+   for idx, data in enumerate(series):
+       start, end = data
+       new_filename = f"{output_path}/{os.path.splitext(os.path.basename(file_path))[0]}_{idx}.wav"
+       track, sr = librosa.load(file_path, sr=44100)
+       librosa.output.write_wav(new_filename, track[int(start):int(end)], sr=44100)
+
+
+class DatasetWithoutLoad(Dataset):
+   """
+   This dataset subclass is used for reading data records
+   and passing it to corresponding models in specified shape
+   """
+   def __init__(self, data, preproc_fn: Callable = None):
+       """
+       Constructor
+       :param data: path to dataset file (.npy)
+       :param preproc_fn: preprocessing function. Should return new data and new shape. (optional)
+       """
+       self._data = data
+       self._preproc_fn = preproc_fn
+
+   def __len__(self):
+       return len(self._data)
+
+   def __getitem__(self, idx):
+       return process_rec(idx, self._data, self._preproc_fn)
+
+import time
+import argparse
+import sys
+
+import numpy as np
+import librosa
+import onnxruntime
+import noisereduce as nr
+from torchaudio.transforms import MFCC
+from torch import tensor
+
+from tools.full_api.utils import preprocess_wav, embed_utterance
+
+
+st = time.time()
+WINDOW_STEP = 0.5
+SIGNAL_DURATION = 1
+freq_THRESHOLD = 0.6
+noise_THRESHOLD = 0.8
+lower_noise_THRESHOLD = 0.7
+
+
+def parse_args():
+   parser = argparse.ArgumentParser(
+       description='Script to run training process')
+
+   parser.add_argument('-a', '--audio', type=str,
+                       required=True,
+                       help='path to audio file')
+
+   parser.add_argument('-c', '--classifier', type=str,
+                       required=True,
+                       help='path to main classifier model')
+
+   parser.add_argument('-n', '--noiser', type=str,
+                       required=True,
+                       help='path to noiser model')
+
+   parser.add_argument('-d', '--detector', type=str,
+                       required=True,
+                       help='path to detector model')
+
+   return parser.parse_args()
+
+
+def make_records_for_detector(rec, sample_rate):
+   """
+   Generates list of records for detector
+   :param rec:(array) librosa audio waveform
+   :param sample_rate:(int) sample rate
+   :return:(list) list of short audio samples
+   """
+   sample_window_step = WINDOW_STEP * sample_rate
+   sample_signal_dur = SIGNAL_DURATION * sample_rate
+
+   start_samples = [int(sample) for sample in np.arange(0, len(rec), sample_window_step)
+                    if sample + sample_signal_dur < len(rec)]
+
+   tracks = []
+   for start in start_samples:
+       tracks.append(librosa.feature.mfcc(rec[start:start + sample_signal_dur]))
+
+   return tracks
+
+
+def detect(model, record):
+   """
+   Detector main function. Try to detect cough in all records
+   :param model:(ONNX) detector onnx model
+   :param record:(ndarray) audio mfcc spectrogram
+   :return:(bool) cough detector prediction
+   """
+   count = 0
+   for item in record:
+       ort_outs = model.run(None,
+                            {'input_1': np.expand_dims(item, axis=(1, 0))}
+                            )
+       if round(ort_outs[0].item()) == 1:
+           count += 1
+   return count
+
+
+def make_input(in_track):
+   """
+   Generate input batch
+   :param in_track:(array) audio waveform
+   :return:(ndarray) input batch
+   """
+   mfcc_transform = MFCC(
+       sample_rate=44100,
+       n_mfcc=20, melkwargs={'n_fft': 2048, 'n_mels': 128, 'hop_length': 512})
+
+   spec = mfcc_transform(tensor(in_track).unsqueeze(0))
+   spec = spec[0].numpy()
+   out = []
+   w = 256
+   new_spec = np.pad(spec,
+                     ((0, 0), (0, w - (spec.shape[1] - w * int(spec.shape[1] / w)))),
+                     'constant',
+                     constant_values=0).astype('float32')
+   for i in range(round(new_spec.shape[1] / w)):
+       out.append(np.expand_dims(new_spec[:, i * w:(i + 1) * w], axis=(1, 0)))
+
+   return np.concatenate(out, axis=0)
+
+
+def noise_classification(model, default_track, denoised_track, sr):
+   """
+   Noise classification main function. Predicts noise in audio
+   :param model:(ONNX) embedder onnx model
+   :param default_track:(ndarray) input waveform
+   :param denoised_track:(ndarray) denoised waveform
+   :param sr:(int) sample rate
+   :return:(float) noise classification prediction
+   """
+
+   default_embed = embed_utterance(model, preprocess_wav(default_track, sr))
+   denoised_embed = embed_utterance(model, preprocess_wav(denoised_track, sr))
+
+   return np.inner(default_embed, denoised_embed)
+
+
+def covid_classification(model, batch):
+   """
+   Covid classifier main function
+   :param model:(ONNX) covid classifier onnx model
+   :param batch:(ndarray) input batch
+   :return:(float) covid classifier prediction
+   """
+   ort_outs = model.run(None, {'input_1': batch})
+
+   return ort_outs[0].item()
+
+
+def waveform_noise_reduction(in_track, sr):
+   """
+   Audio denoising function
+   :param in_track:(array) audio waveform
+   :param sr:(int) sample rate
+   :return:(array) denoised audio waveform
+   """
+   return nr.reduce_noise(y=in_track,
+                          sr=sr,
+                          n_std_thresh_stationary=1.3,
+                          use_tqdm=True).astype('float32')
+
+
+if __name__ == '__main__':
+   args = parse_args()
+   sa = time.time()
+   covid_model = onnxruntime.InferenceSession(args.classifier)
+   embedder_model = onnxruntime.InferenceSession(args.noiser)
+   detector_model = onnxruntime.InferenceSession(args.detector)
+   track, sr = librosa.load(args.audio, sr=44100)
+   print("Loading audio file and models time: %.2f seconds" % (time.time() - sa))
+
+   if len(track) < 66500:
+       print(f'Records is too short. {round(len(track)/sr, 3)} seconds\n'
+             f'Try at least 2 seconds\n'
+             f'But recommended record length is 10 seconds')
+       print("Inference time: %.2f seconds" % (time.time() - st))
+   else:
+       detect_counts = detect(detector_model,
+                              make_records_for_detector(track, sr))
+       freq = detect_counts / (len(track) / sr)
+
+       if freq == 0:
+           print(f'Cough not detected on record\n'                 
+                 f'Please try again')
+           sys.exit()
+       elif freq < freq_THRESHOLD:
+           print(f'There are too few entries for {round(len(track)/sr,1)} seconds record\n'
+                 f'Classification quality can get worse')
+
+       track_redu = waveform_noise_reduction(track, sr)
+
+       noise_predict = noise_classification(embedder_model, track, track_redu, sr)
+
+       if noise_predict < lower_noise_THRESHOLD:
+           print('Record is too noisy\n'
+                 'Please try again')
+           sys.exit()
+
+       elif noise_predict < noise_THRESHOLD:
+           print('Record may contains noise\n'
+                 'Classification quality can get worse')
+
+       covid_predict = covid_classification(covid_model, make_input(track))
+
+       print(f'Covid prediction: {round(covid_predict*100, 1)}%')
+       print("Inference time: %.2f seconds" % (time.time() - st))
+
+
+## Mel-filterbank
+mel_window_length = 25  # In milliseconds
+mel_window_step = 10    # In milliseconds
+mel_n_channels = 40
+
+
+## Audio
+sampling_rate = 16000
+# Number of spectrogram frames in a partial utterance
+partials_n_frames = 160     # 1600 ms
+
+
+## Voice Activation Detection
+# Window size of the VAD. Must be either 10, 20 or 30 milliseconds.
+# This sets the granularity of the VAD. Should not need to be changed.
+vad_window_length = 30  # In milliseconds
+# Number of frames to average together when performing the moving average smoothing.
+# The larger this value, the larger the VAD variations must be to not get smoothed out.
+vad_moving_average_width = 8
+# Maximum number of consecutive silent frames a segment can have.
+vad_max_silence_length = 6
+
+
+## Audio volume normalization
+audio_norm_target_dBFS = -30
+
+
+## Model parameters
+model_hidden_size = 256
+model_embedding_size = 256
+model_num_layers = 3
+
+int16_max = (2 ** 15) - 1
+import numpy as np
+import librosa
+import webrtcvad
+from tools.full_api.params import *
+import struct
+from scipy.ndimage.morphology import binary_dilation
+
+
+def preprocess_wav(wav, source_sr):
+   """
+   Applies preprocessing operations to a waveform either on disk or in memory such that
+   The waveform will be resampled to match the data hyperparameters.
+
+   :param wav: wav waveform
+   :param source_sr: if passing an audio waveform, the sampling rate of the waveform before
+   preprocessing. After preprocessing, the waveform's sampling rate will match the data
+   :returns preprocessed waveform
+   """
+
+   # Resample the wav
+   if source_sr != 16000:
+       wav = librosa.resample(wav, source_sr, 16000)
+
+   # Apply the preprocessing: normalize volume and shorten long silences
+   wav = normalize_volume(wav, audio_norm_target_dBFS, increase_only=True)
+   wav = trim_long_silences(wav)
+
+   return wav
+
+
+def trim_long_silences(wav):
+   """
+   Ensures that segments without voice in the waveform remain no longer than a
+   threshold determined by the VAD parameters in params.py.
+
+   :param wav: the raw waveform as a numpy array of floats
+   :return: the same waveform with silences trimmed away (length <= original wav length)
+   """
+   # Compute the voice detection window size
+   samples_per_window = (vad_window_length * sampling_rate) // 1000
+
+   # Trim the end of the audio to have a multiple of the window size
+   wav = wav[:len(wav) - (len(wav) % samples_per_window)]
+
+   # Convert the float waveform to 16-bit mono PCM
+   pcm_wave = struct.pack("%dh" % len(wav), *(np.round(wav * int16_max)).astype(np.int16))
+
+   # Perform voice activation detection
+   voice_flags = []
+   vad = webrtcvad.Vad(mode=3)
+   for window_start in range(0, len(wav), samples_per_window):
+       window_end = window_start + samples_per_window
+       voice_flags.append(vad.is_speech(pcm_wave[window_start * 2:window_end * 2],
+                                        sample_rate=sampling_rate))
+   voice_flags = np.array(voice_flags)
+
+   # Smooth the voice detection with a moving average
+   def moving_average(array, width):
+       array_padded = np.concatenate((np.zeros((width - 1) // 2), array, np.zeros(width // 2)))
+       ret = np.cumsum(array_padded, dtype=float)
+       ret[width:] = ret[width:] - ret[:-width]
+       return ret[width - 1:] / width
+
+   audio_mask = moving_average(voice_flags, vad_moving_average_width)
+   audio_mask = np.round(audio_mask).astype(np.bool)
+
+   # Dilate the voiced regions
+   audio_mask = binary_dilation(audio_mask, np.ones(vad_max_silence_length + 1))
+   audio_mask = np.repeat(audio_mask, samples_per_window)
+
+   return wav[audio_mask == True]
+
+
+def normalize_volume(wav, target_dBFS, increase_only=False, decrease_only=False):
+   if increase_only and decrease_only:
+       raise ValueError("Both increase only and decrease only are set")
+   rms = np.sqrt(np.mean((wav * int16_max) ** 2))
+   wave_dBFS = 20 * np.log10(rms / int16_max)
+   dBFS_change = target_dBFS - wave_dBFS
+   if dBFS_change < 0 and increase_only or dBFS_change > 0 and decrease_only:
+       return wav
+   return wav * (10 ** (dBFS_change / 20))
+
+
+def wav_to_mel_spectrogram(wav):
+   """
+   Derives a mel spectrogram ready to be used by the encoder from a preprocessed audio waveform.
+   Note: this not a log-mel spectrogram.
+   """
+   frames = librosa.feature.melspectrogram(
+       wav,
+       sampling_rate,
+       n_fft=int(sampling_rate * mel_window_length / 1000),
+       hop_length=int(sampling_rate * mel_window_step / 1000),
+       n_mels=mel_n_channels
+   )
+   return frames.astype(np.float32).T
+
+
+def compute_partial_slices(n_samples: int, rate, min_coverage):
+   """
+   Computes where to split an utterance waveform and its corresponding mel spectrogram to
+   obtain partial utterances of <partials_n_frames> each. Both the waveform and the
+   mel spectrogram slices are returned, so as to make each partial utterance waveform
+   correspond to its spectrogram.
+
+   The returned ranges may be indexing further than the length of the waveform. It is
+   recommended that you pad the waveform with zeros up to wav_slices[-1].stop.
+
+   :param n_samples: the number of samples in the waveform
+   :param rate: how many partial utterances should occur per second. Partial utterances must
+   cover the span of the entire utterance, thus the rate should not be lower than the inverse
+   of the duration of a partial utterance. By default, partial utterances are 1.6s long and
+   the minimum rate is thus 0.625.
+   :param min_coverage: when reaching the last partial utterance, it may or may not have
+   enough frames. If at least <min_pad_coverage> of <partials_n_frames> are present,
+   then the last partial utterance will be considered by zero-padding the audio. Otherwise,
+   it will be discarded. If there aren't enough frames for one partial utterance,
+   this parameter is ignored so that the function always returns at least one slice.
+   :return: the waveform slices and mel spectrogram slices as lists of array slices. Index
+   respectively the waveform and the mel spectrogram with these slices to obtain the partial
+   utterances.
+   """
+   assert 0 < min_coverage <= 1
+
+   # Compute how many frames separate two partial utterances
+   samples_per_frame = int((sampling_rate * mel_window_step / 1000))
+   n_frames = int(np.ceil((n_samples + 1) / samples_per_frame))
+   frame_step = int(np.round((sampling_rate / rate) / samples_per_frame))
+   assert 0 < frame_step, "The rate is too high"
+   assert frame_step <= partials_n_frames, "The rate is too low, it should be %f at least" % \
+                                           (sampling_rate / (samples_per_frame * partials_n_frames))
+
+   # Compute the slices
+   wav_slices, mel_slices = [], []
+   steps = max(1, n_frames - partials_n_frames + frame_step + 1)
+   for i in range(0, steps, frame_step):
+       mel_range = np.array([i, i + partials_n_frames])
+       wav_range = mel_range * samples_per_frame
+       mel_slices.append(slice(*mel_range))
+       wav_slices.append(slice(*wav_range))
+
+   # Evaluate whether extra padding is warranted or not
+   last_wav_range = wav_slices[-1]
+   coverage = (n_samples - last_wav_range.start) / (last_wav_range.stop - last_wav_range.start)
+   if coverage < min_coverage and len(mel_slices) > 1:
+       mel_slices = mel_slices[:-1]
+       wav_slices = wav_slices[:-1]
+
+   return wav_slices, mel_slices
+
+
+def embed_utterance(model_onnx, wav: np.ndarray, return_partials=False, rate=1.3, min_coverage=0.75):
+   """
+   Computes an embedding for a single utterance. The utterance is divided in partial
+   utterances and an embedding is computed for each. The complete utterance embedding is the
+   L2-normed average embedding of the partial utterances.
+
+   TODO: independent batched version of this function
+
+   :param wav: a preprocessed utterance waveform as a numpy array of float32
+   :param return_partials: if True, the partial embeddings will also be returned along with
+   the wav slices corresponding to each partial utterance.
+   :param rate: how many partial utterances should occur per second. Partial utterances must
+   cover the span of the entire utterance, thus the rate should not be lower than the inverse
+   of the duration of a partial utterance. By default, partial utterances are 1.6s long and
+   the minimum rate is thus 0.625.
+   :param min_coverage: when reaching the last partial utterance, it may or may not have
+   enough frames. If at least <min_pad_coverage> of <partials_n_frames> are present,
+   then the last partial utterance will be considered by zero-padding the audio. Otherwise,
+   it will be discarded. If there aren't enough frames for one partial utterance,
+   this parameter is ignored so that the function always returns at least one slice.
+   :return: the embedding as a numpy array of float32 of shape (model_embedding_size,). If
+   <return_partials> is True, the partial utterances as a numpy array of float32 of shape
+   (n_partials, model_embedding_size) and the wav partials as a list of slices will also be
+   returned.
+   """
+   # Compute where to split the utterance into partials and pad the waveform with zeros if
+   # the partial utterances cover a larger range.
+   wav_slices, mel_slices = compute_partial_slices(len(wav), rate, min_coverage)
+   max_wave_length = wav_slices[-1].stop
+   if max_wave_length >= len(wav):
+       wav = np.pad(wav, (0, max_wave_length - len(wav)), "constant")
+
+   # Split the utterance into partials and forward them through the model
+   mel = wav_to_mel_spectrogram(wav)
+   mels = np.array([mel[s] for s in mel_slices])
+
+   ort_outs = model_onnx.run(None, {
+       'input_1': mels
+   })
+   partial_embeds = ort_outs[0]
+
+   # Compute the utterance embedding from the partial embeddings
+   raw_embed = np.mean(partial_embeds, axis=0)
+   embed = raw_embed / np.linalg.norm(raw_embed, 2)
+
+   if return_partials:
+       return embed, partial_embeds, wav_slices
+   return embed
+#!/usr/bin/env
+from typing import Callable
+from torch.utils.data import Dataset
+
+from data.data_pipeline.utils import process_rec
+
+
+class DatasetWithoutLoad(Dataset):
+   """
+   This dataset subclass is used for reading data records
+   and passing it to corresponding models in specified shape
+   """
+   def __init__(self, data, preproc_fn: Callable = None):
+       """
+       Constructor
+       :param data: path to dataset file (.npy)
+       :param preproc_fn: preprocessing function. Should return new data and new shape. (optional)
+       """
+       self._data = data
+       self._preproc_fn = preproc_fn
+
+   def __len__(self):
+       return len(self._data)
+
+   def __getitem__(self, idx):
+       return process_rec(idx, self._data, self._preproc_fn)
+
+## Mel-filterbank
+mel_window_length = 25  # In milliseconds
+mel_window_step = 10    # In milliseconds
+mel_n_channels = 40
+
+
+## Audio
+sampling_rate = 16000
+# Number of spectrogram frames in a partial utterance
+partials_n_frames = 160     # 1600 ms
+
+
+## Voice Activation Detection
+# Window size of the VAD. Must be either 10, 20 or 30 milliseconds.
+# This sets the granularity of the VAD. Should not need to be changed.
+vad_window_length = 30  # In milliseconds
+# Number of frames to average together when performing the moving average smoothing.
+# The larger this value, the larger the VAD variations must be to not get smoothed out.
+vad_moving_average_width = 8
+# Maximum number of consecutive silent frames a segment can have.
+vad_max_silence_length = 6
+
+
+## Audio volume normalization
+audio_norm_target_dBFS = -30
+
+
+## Model parameters
+model_hidden_size = 256
+model_embedding_size = 256
+model_num_layers = 3
+
+
+import sys
+
+import numpy as np
+
+from tools.speaker_ID.utils import detect, \
+   make_records_for_detector, \
+   preprocess_wav, \
+   embed_utterance, \
+   WINDOW_STEP
+
+speech_len_threshold = 3
+
+
+def make_embed(model, record, sample_rate):
+   """
+
+   :param model: embedder model
+   :param record: speech audio array
+   :param sample_rate: sample rate
+   :return: audio embedding
+   """
+   processed_record = preprocess_wav(record, sample_rate)
+   if len(processed_record) / 16000 < speech_len_threshold:
+       print('To few speech or not detected')
+       sys.exit()
+   return embed_utterance(processed_record, model)
+
+
+def split_audio(record, sample_rate, model=None, point=None):
+   """
+   Split audio for speech and cough. Uses model or split second.
+   :param record: full audio array
+   :param sample_rate: sample rate
+   :param model: detector model
+   :param point: separation point between speech and cough
+   :returns two audio arrays
+   """
+   if point:
+       point = point / WINDOW_STEP
+       model = None
+   if model:
+       _, point = detect(model, make_records_for_detector(record, sample_rate))
+   speech_ = record[:int(sample_rate * point * WINDOW_STEP)]
+   coughing = record[int(sample_rate * point * WINDOW_STEP):]
+   return speech_, coughing
+
+
+def calculate_similarity(emb1, emb2):
+   """
+   Cosine similarity between two embeddings.
+   :param emb1: first embedding
+   :param emb2: second embedding
+   :return: cosine similarity
+   """
+   return np.inner(emb1, emb2)
+
+
+import librosa
+import numpy as np
+import webrtcvad
+import struct
+from scipy.ndimage.morphology import binary_dilation
+
+from tools.speaker_ID.cons import *
+
+
+WINDOW_STEP = 0.5
+SIGNAL_DURATION = 1
+freq_THRESHOLD = 0.6
+int16_max = (2 ** 15) - 1
+
+
+def make_records_for_detector(rec, sample_rate):
+   """
+   Generates list of records for detector
+   :param rec:(array) librosa audio waveform
+   :param sample_rate:(int) sample rate
+   :return:(list) list of short audio samples
+   """
+   sample_window_step = WINDOW_STEP * sample_rate
+   sample_signal_dur = SIGNAL_DURATION * sample_rate
+
+   start_samples = [int(sample) for sample in np.arange(0, len(rec), sample_window_step)
+                    if sample + sample_signal_dur < len(rec)]
+
+   tracks = []
+   for start in start_samples:
+       tracks.append(librosa.feature.mfcc(rec[start:start + sample_signal_dur]))
+
+   return tracks
+
+
+def detect(model, record):
+   """
+   Detector main function. Try to detect cough in all records
+   :param model:(ONNX) detector onnx model
+   :param record:(ndarray) audio mfcc spectrogram
+   :return:(bool) cough detector prediction
+   """
+   count = 0
+   for i in range(len(record)):
+       ort_outs = model.run(None,
+                            {'input_1': np.expand_dims(record[i], axis=(1, 0))}
+                            )
+       if round(ort_outs[0].item()) == 1:
+           if count == 0:
+               tag = i
+           count += 1
+   return count, tag
+
+
+def preprocess_wav(wav, source_sr):
+   """
+   Applies preprocessing operations to a waveform either on disk or in memory such that
+   The waveform will be resampled to match the data hyperparameters.
+
+   :param wav: audio array
+   :param source_sr: if passing an audio waveform, the sampling rate of the waveform before
+   preprocessing. After preprocessing, the waveform's sampling rate will match the data
+   """
+
+   # Resample the wav
+   if source_sr != 16000:
+       wav = librosa.resample(wav, source_sr, 16000)
+
+   # Apply the preprocessing: normalize volume and shorten long silences
+   wav = normalize_volume(wav, audio_norm_target_dBFS, increase_only=True)
+   wav = trim_long_silences(wav)
+
+   return wav
+
+
+def trim_long_silences(wav):
+   """
+   Ensures that segments without voice in the waveform remain no longer than a
+   threshold determined by the VAD parameters in params.py.
+
+   :param wav: the raw waveform as a numpy array of floats
+   :return: the same waveform with silences trimmed away (length <= original wav length)
+   """
+   # Compute the voice detection window size
+   samples_per_window = (vad_window_length * sampling_rate) // 1000
+
+   # Trim the end of the audio to have a multiple of the window size
+   wav = wav[:len(wav) - (len(wav) % samples_per_window)]
+
+   # Convert the float waveform to 16-bit mono PCM
+   pcm_wave = struct.pack("%dh" % len(wav), *(np.round(wav * int16_max)).astype(np.int16))
+
+   # Perform voice activation detection
+   voice_flags = []
+   vad = webrtcvad.Vad(mode=3)
+   for window_start in range(0, len(wav), samples_per_window):
+       window_end = window_start + samples_per_window
+       voice_flags.append(vad.is_speech(pcm_wave[window_start * 2:window_end * 2],
+                                        sample_rate=sampling_rate))
+   voice_flags = np.array(voice_flags)
+
+   # Smooth the voice detection with a moving average
+   def moving_average(array, width):
+       array_padded = np.concatenate((np.zeros((width - 1) // 2), array, np.zeros(width // 2)))
+       ret = np.cumsum(array_padded, dtype=float)
+       ret[width:] = ret[width:] - ret[:-width]
+       return ret[width - 1:] / width
+
+   audio_mask = moving_average(voice_flags, vad_moving_average_width)
+   audio_mask = np.round(audio_mask).astype(np.bool)
+
+   # Dilate the voiced regions
+   audio_mask = binary_dilation(audio_mask, np.ones(vad_max_silence_length + 1))
+   audio_mask = np.repeat(audio_mask, samples_per_window)
+
+   return wav[audio_mask == True]
+
+
+def normalize_volume(wav, target_dBFS, increase_only=False, decrease_only=False):
+   if increase_only and decrease_only:
+       raise ValueError("Both increase only and decrease only are set")
+   rms = np.sqrt(np.mean((wav * int16_max) ** 2))
+   wave_dBFS = 20 * np.log10(rms / int16_max)
+   dBFS_change = target_dBFS - wave_dBFS
+   if dBFS_change < 0 and increase_only or dBFS_change > 0 and decrease_only:
+       return wav
+   return wav * (10 ** (dBFS_change / 20))
+
+
+def wav_to_mel_spectrogram(wav):
+   """
+   Derives a mel spectrogram ready to be used by the encoder from a preprocessed audio waveform.
+   Note: this not a log-mel spectrogram.
+   """
+   frames = librosa.feature.melspectrogram(
+       wav,
+       sampling_rate,
+       n_fft=int(sampling_rate * mel_window_length / 1000),
+       hop_length=int(sampling_rate * mel_window_step / 1000),
+       n_mels=mel_n_channels
+   )
+   return frames.astype(np.float32).T
+
+
+def compute_partial_slices(n_samples: int, rate, min_coverage):
+   """
+   Computes where to split an utterance waveform and its corresponding mel spectrogram to
+   obtain partial utterances of <partials_n_frames> each. Both the waveform and the
+   mel spectrogram slices are returned, so as to make each partial utterance waveform
+   correspond to its spectrogram.
+
+   The returned ranges may be indexing further than the length of the waveform. It is
+   recommended that you pad the waveform with zeros up to wav_slices[-1].stop.
+
+   :param n_samples: the number of samples in the waveform
+   :param rate: how many partial utterances should occur per second. Partial utterances must
+   cover the span of the entire utterance, thus the rate should not be lower than the inverse
+   of the duration of a partial utterance. By default, partial utterances are 1.6s long and
+   the minimum rate is thus 0.625.
+   :param min_coverage: when reaching the last partial utterance, it may or may not have
+   enough frames. If at least <min_pad_coverage> of <partials_n_frames> are present,
+   then the last partial utterance will be considered by zero-padding the audio. Otherwise,
+   it will be discarded. If there aren't enough frames for one partial utterance,
+   this parameter is ignored so that the function always returns at least one slice.
+   :return: the waveform slices and mel spectrogram slices as lists of array slices. Index
+   respectively the waveform and the mel spectrogram with these slices to obtain the partial
+   utterances.
+   """
+   assert 0 < min_coverage <= 1
+
+   # Compute how many frames separate two partial utterances
+   samples_per_frame = int((sampling_rate * mel_window_step / 1000))
+   n_frames = int(np.ceil((n_samples + 1) / samples_per_frame))
+   frame_step = int(np.round((sampling_rate / rate) / samples_per_frame))
+   assert 0 < frame_step, "The rate is too high"
+   assert frame_step <= partials_n_frames, "The rate is too low, it should be %f at least" % \
+                                           (sampling_rate / (samples_per_frame * partials_n_frames))
+
+   # Compute the slices
+   wav_slices, mel_slices = [], []
+   steps = max(1, n_frames - partials_n_frames + frame_step + 1)
+   for i in range(0, steps, frame_step):
+       mel_range = np.array([i, i + partials_n_frames])
+       wav_range = mel_range * samples_per_frame
+       mel_slices.append(slice(*mel_range))
+       wav_slices.append(slice(*wav_range))
+
+   # Evaluate whether extra padding is warranted or not
+   last_wav_range = wav_slices[-1]
+   coverage = (n_samples - last_wav_range.start) / (last_wav_range.stop - last_wav_range.start)
+   if coverage < min_coverage and len(mel_slices) > 1:
+       mel_slices = mel_slices[:-1]
+       wav_slices = wav_slices[:-1]
+
+   return wav_slices, mel_slices
+
+
+def embed_utterance(wav: np.ndarray, ort_session, return_partials=False, rate=1.3, min_coverage=0.75):
+
+   # Compute where to split the utterance into partials and pad the waveform with zeros if
+   # the partial utterances cover a larger range.
+   wav_slices, mel_slices = compute_partial_slices(len(wav), rate, min_coverage)
+   max_wave_length = wav_slices[-1].stop
+   if max_wave_length >= len(wav):
+       wav = np.pad(wav, (0, max_wave_length - len(wav)), "constant")
+
+   # Split the utterance into partials and forward them through the model
+   mel = wav_to_mel_spectrogram(wav)
+   mels = np.array([mel[s] for s in mel_slices])
+
+   ort_outs = ort_session.run(None, {
+       'input_1': mels
+   })
+   partial_embeds = ort_outs[0]
+
+   # Compute the utterance embedding from the partial embeddings
+   raw_embed = np.mean(partial_embeds, axis=0)
+   embed = raw_embed / np.linalg.norm(raw_embed, 2)
+
+   if return_partials:
+       return embed, partial_embeds, wav_slices
+   return embed
+#!/usr/bin/env
+import argparse
+import warnings
+import os
+import librosa
+
+from core.pipeline import prepare_config
+from tools.detector.detector_api import load_model, detect_cough
+from tools.detector.utils import save_cough_series
+
+
+def parse_args():
+   parser = argparse.ArgumentParser(
+       description='Script to evaluate one record using the model')
+
+   parser.add_argument('-m', '--model', type=str,
+                       required=True, help='path to model')
+   parser.add_argument('-c', '--config', type=str,
+                       required=True, help='path to config file')
+   parser.add_argument('-i', '--input', type=str,
+                       required=True, help='input path')
+   parser.add_argument('-o', '--output', type=str,
+                       required=True, help='output path')
+   return parser.parse_args()
+
+
+def eval_track(config_path, model_path):
+   _, model_conf, _, _ = prepare_config(config_path)
+
+   # load model
+   model = load_model(model_path,
+                      model_conf.get_string('name'),
+                      model_conf.get_list('args.input_shape')
+                      )
+
+   for root, _, files in os.walk(args.input):
+       for name in files:
+           path = os.path.join(root, name)
+           with warnings.catch_warnings():
+               warnings.simplefilter("ignore")
+               try:
+                   track, sr = librosa.load(path, sr=44100)
+                   series = detect_cough(model, track, sr)
+                   save_cough_series(series, path, args.output)
+               except FileNotFoundError:
+                   print(f'Fail to load: {path}')
+                   continue
+
+
+if __name__ == '__main__':
+   args = parse_args()
+   eval_track(args.config, args.model)
+
+#!/usr/bin/env
+import argparse
+from pathlib import Path
+import librosa
+import warnings
+
+from data.utils import make_dataframe
+
+"""
+   This script return one shallowed subtrack from one track and
+   saves it to another directory under the same name.
+"""
+
+
+def parse_args():
+   parser = argparse.ArgumentParser(
+       description='Script return one shallowed subtrack from one track')
+
+   parser.add_argument('-i', '--input-dataset-table', type=str,
+                       help='table with dataset info')
+   parser.add_argument('-c', '--cut-cough', action='store_true',
+                       required=False, default=False,
+                       help='cut cough track')
+   parser.add_argument('-il', '--interval', type=float,
+                       required=False,
+                       default=0.2,
+                       help='start and end cropping interval')
+
+   return parser.parse_args()
+
+
+def cut_track_from_row(df_row):
+   if args.cut_cough:
+       cough_series = [tuple(cough_ts.split('-'))
+                       for cough_ts in df_row.cough_series.split()]
+
+       start_of_series = float(cough_series[0][0])
+       end_of_series = float(cough_series[len(cough_series) - 1][1])
+       audio_type_path = 'cough_audio'
+   else:
+       inhales_series = [tuple(breath_ts.split('-'))
+                         for breath_ts in df_row.inhales_series.split()]
+       exhale_series = [tuple(breath_ts.split('-'))
+                        for breath_ts in df_row.exhale_series.split()]
+       start_of_series = float(inhales_series[0][0])
+       end_of_series = float(exhale_series[len(exhale_series) - 1][1])
+       audio_type_path = 'breath_audio'
+
+   input_audio_path = Path(args.input_dataset_table).parent / str(df_row.array[0])
+   output_audio_path = Path(args.input_dataset_table).parent / audio_type_path / str(df_row.array[0])
+   print(output_audio_path)
+   output_audio_path.parent.mkdir(parents=True, exist_ok=True)
+
+   with warnings.catch_warnings():
+       warnings.simplefilter("ignore")
+       try:
+           track, sr = librosa.load(input_audio_path, sr=44100)
+       except OSError:
+           print('File ', input_audio_path, 'does not exist')
+           return
+       start = start_of_series - args.interval if start_of_series > args.interval else 0
+       end = end_of_series + args.interval
+       start_sample = int(start * sr)
+       end_sample = int(end * sr)
+       cut_track = track[start_sample:] if end_sample > len(track) else track[start_sample:end_sample]
+       librosa.output.write_wav(output_audio_path, cut_track, sr=44100)
+
+
+def cut_tracks(df):
+   for idx, (_, row) in enumerate(df.iterrows()):
+       cut_track_from_row(row)
+       if idx != 0 and idx % 10 == 0:
+           print(f'Processed {idx} dataframe rows')
+
+
+if __name__ == "__main__":
+   args = parse_args()
+   print('Start data frame initializing.')
+   print('Data frame initialized')
+   data_frame = make_dataframe(args.input_dataset_table, is_cough=args.cut_cough)
+   cut_tracks(data_frame)
+   print('The program is over')
+#!/usr/bin/env
+import torch
+from torch.utils.data import DataLoader
+import argparse
+import numpy as np
+from pathlib import Path
+
+from core.train.eval import evaluate
+from core.pipeline import prepare_config
+from models.algorithms import algorithms
+from metrics.confusion_metric import ConfusionMetric
+from data.data_pipeline.dataset import BaseDataset
+from data.data_pipeline.utils import make_collate_fn
+from data.utils import generate_classification_metric, generate_detection_metric
+from core.train.utils import custom_load_dict
+
+def parse_args():
+   parser = argparse.ArgumentParser(
+       description='Script to convert data into .nyp format')
+
+   parser.add_argument('-m', '--model', type=str,
+                       required=True, help='path to model')
+   parser.add_argument('-c', '--config', type=str,
+                       required=True, help='path to config file')
+   parser.add_argument('-d', '--download-audio-path', type=str, required=False, default=None,
+                       help='download path audio where the neural network made mistake')
+   parser.add_argument('-s', '--source-table', action='store_true',
+                       required=False, default=False,
+                       help='enable source metric table')
+   parser.add_argument('-md', '--metadata-table', action='store_true',
+                       required=False, default=False,
+                       help='enable metadata table')
+   parser.add_argument('-t', "--confusion-types", nargs="+", default=["fp", "fn"],
+                       help='types of confusion')
+
+   return parser.parse_args()
+
+
+def eval_func(config_path, model_path):
+   data_conf, model_conf, _, train_conf = prepare_config(config_path)
+
+   # load model
+   model = algorithms.get(model_conf.get_string('name'))(**model_conf['args'])
+   model_weights = torch.load(Path(model_path))
+   model = custom_load_dict(model, model_weights)
+   # init CPU device
+   device = torch.device('cpu')
+   # load model into CPU
+   model = model.to(device)
+   # init data loader
+   dataset = BaseDataset(data_conf.get_string('generated.eval_data'))
+   dataloader = DataLoader(
+       dataset,
+       train_conf.get_int('batch_size'),
+       collate_fn=make_collate_fn(device, model)
+   )
+
+   records = np.load(data_conf.get_string('generated.eval_data'), allow_pickle=True)
+   source = [rec['source'] for rec in records]
+   cms = evaluate(model, dataloader, ConfusionMetric())
+
+   if data_conf.get_string('name') in 'detection':
+       print(generate_detection_metric(source, cms, args.confusion_types,))
+   else:
+       if args.source_table:
+           print('Source metric:')
+           print(generate_classification_metric(data_conf, source, cms))
+       if args.metadata_table:
+           print('Metadata:')
+           print(generate_classification_metric(data_conf,
+                                                source,
+                                                cms,
+                                                args.confusion_types,
+                                                args.download_audio_path
+                                                ))
+
+
+if __name__ == '__main__':
+   args = parse_args()
+   eval_func(args.config, args.model)
+
+#!/usr/bin/env
+import argparse
+from core.pipeline import app_pipeline
+from core.train.eval_pipeline import eval_pipeline
+
+
+def parse_args():
+   parser = argparse.ArgumentParser(
+       description='Script to convert data into .nyp format')
+
+   parser.add_argument('-m', '--model', type=str,
+                       required=True, help='path to model')
+
+   parser.add_argument('-c', '--config', type=str,
+                       required=True, help='path to config file')
+
+   return parser.parse_args()
+
+
+if __name__ == '__main__':
+   args = parse_args()
+   app_pipeline(args.config, eval_pipeline, args.model)
+
+#!/usr/bin/env
+import torch
+from pathlib import Path
+
+from models.algorithms import algorithms
+
+
+def load_model(model_path, model_name='attention_cnn', shape=(20, 256), dropout=0.1):
+   model = algorithms.get(model_name)(shape, dropout)
+   device = torch.device('cuda')
+   model = model.to(device)
+   model.load_state_dict(torch.load(Path(model_path)))
+   return model
+#!/usr/bin/env
+import argparse
+import warnings
+warnings.filterwarnings("ignore")
+import librosa
+import torch
+from torch.utils.data import DataLoader
+from pathlib import PurePath
+
+from data.data_pipeline.utils import make_collate_fn
+from core.pipeline import prepare_config
+from tools.noiser.noiser import DatasetWithoutLoad
+from tools.load_model import load_model
+
+
+def parse_args():
+   parser = argparse.ArgumentParser(
+       description='Script to evaluate one record using the model')
+
+   parser.add_argument('-m', '--model', type=str,
+                       required=True, help='path to model')
+   parser.add_argument('-c', '--config', type=str,
+                       required=True, help='path to config file')
+   parser.add_argument('-i', '--input', type=str,
+                       required=True, help='input path')
+
+   return parser.parse_args()
+
+
+def prepare(config_path, model_path, input_path):
+   _, model_conf, _, _ = prepare_config(config_path)
+
+   # load model
+   model = load_model(model_path,
+                      model_conf.get_string('name'),
+                      model_conf.get_list('args.input_shape'),
+                      model_conf['args.dropout_rate']
+                      )
+   track, _ = librosa.load(input_path, sr=44100)
+   data = [{
+       'label': 1,
+       'data': [librosa.feature.mfcc(track)],
+       'source': input_path,
+   }]
+   return model, data
+
+
+def make_pred(data, model):
+   dataset = DatasetWithoutLoad(data=data)
+   dataloader = DataLoader(dataset,
+                           batch_size=1,
+                           collate_fn=make_collate_fn(torch.device('cuda'),
+                                                      model))
+
+   model.eval()
+
+   for idx, batch in enumerate(dataloader):
+       if len(batch) == 3:
+           _, data, pad_lengths = batch
+           preds = model.forward((data, pad_lengths))
+       else:
+           _, data = batch
+           preds = model.forward(data)
+
+   return preds
+
+
+if __name__ == '__main__':
+   args = parse_args()
+   model, data = prepare(args.config, args.model, args.input)
+   pred = make_pred(data, model)
+   print(f'Probability this audio ({PurePath(args.input).parts[-1]}) is noisy: {round(float(pred.item()), 5)}')
+
+import torch
+
+import librosa
+import librosa.feature
+
+def wav_questible(preds, data, idx, path_to_save, spec):
+   data_np = data.cpu().numpy()
+   print(f'Start generate questible tracks for batch {idx + 1}')
+   for bt in range(len(preds)):
+       if (preds[bt].cpu().numpy()[0] < 0.6) and (preds[bt].cpu().numpy()[0] > 0.4):
+           for idxx in range(data_np.shape[0]):
+               if idxx == 0:
+                   rec = data[idxx][bt]
+               else:
+                   rec = torch.cat((rec, data[idxx][bt]), 1)
+           if spec == 'mfcc':
+               track = librosa.feature.inverse.mfcc_to_audio(rec.cpu().numpy())
+               librosa.output.write_wav(path_to_save + f"questible_{idx + 1}_{bt}_{round(float(preds[bt].cpu().numpy()[0]), 3)}.wav", track, sr=44100)
+
+           elif spec == 'mel':
+               track = librosa.feature.inverse.mel_to_audio(rec.cpu().numpy())
+               librosa.output.write_wav(path_to_save + f"questible_{idx + 1}_{bt}_{round(float(preds[bt].cpu().numpy()[0]), 3)}.wav", track, sr=44100)
+           else:
+               raise ValueError("Wrong spectrogram type. Can't save samples")
+
+   print('Saved questible')
+
+def wav_mistaken(preds, data, idx, label, path_to_save, spec):
+   print(f'Start generate mistaken tracks for batch {idx + 1}')
+   data_np = data.cpu().numpy()
+   for bt in range(len(preds)):
+       if int(preds[bt]) != int(label[bt]):
+           for idxx in range(data_np.shape[0]):
+               if idxx == 0:
+                   rec = data[idxx][bt]
+               else:
+                   rec = torch.cat((rec, data[idxx][bt]), 1)
+           if spec == 'mfcc':
+               track = librosa.feature.inverse.mfcc_to_audio(rec.cpu().numpy())
+               librosa.output.write_wav(path_to_save + f"mistaken_{idx + 1}_{bt}.wav", track, sr=44100)
+           elif spec == 'mel':
+               track = librosa.feature.inverse.mel_to_audio(rec.cpu().numpy())
+               librosa.output.write_wav(path_to_save + f"mistaken_{idx + 1}_{bt}.wav", track, sr=44100)
+           else:
+               raise ValueError("Wrong spectrogram type. Can't save samples")
+   print('Saved mistaken')
+#!/usr/bin/env
+import torch
+from torch.utils.data import DataLoader, Dataset
+from typing import Callable
+import argparse
+from pathlib import Path
+import warnings
+import librosa
+
+from core.data_format import Record
+from core.pipeline import prepare_config
+from data.data_pipeline.utils import make_collate_fn, process_rec
+from models.algorithms import algorithms
+
+"""
+   This script evaluates one record using the model
+"""
+
+
+class NewBaseDataset(Dataset):
+   """
+   This dataset subclass is used for reading data records
+   and passing it to corresponding models in specified shape
+   """
+   def __init__(self, data, preproc_fn: Callable = None):
+       """
+       Constructor
+       :param data: path to dataset file (.npy)
+       :param preproc_fn: preprocessing function. Should return new data and new shape. (optional)
+       """
+       self._data = data
+       self._preproc_fn = preproc_fn
+
+   def __len__(self):
+       return len(self._data)
+
+   def __getitem__(self, idx):
+       return process_rec(idx, self._data, self._preproc_fn)
+
+
+def parse_args():
+   parser = argparse.ArgumentParser(
+       description='Script to evaluate one record using the model')
+
+   parser.add_argument('-m', '--model', type=str,
+                       required=True, help='path to model')
+   parser.add_argument('-c', '--config', type=str,
+                       required=True, help='path to config file')
+   parser.add_argument('-t', '--track', type=str,
+                       required=True, help='path to audio file')
+   return parser.parse_args()
+
+
+def eval_track(config_path, model_path, track_path):
+
+   _, model_conf, _, _ = prepare_config(config_path)
+
+   recs = []
+   with warnings.catch_warnings():
+       warnings.simplefilter("ignore")
+       try:
+           track, sr = librosa.load(Path(track_path), sr=44100)
+       except OSError:
+           print('File ', track_path, 'does not exist')
+           return
+
+   track = librosa.feature.melspectrogram(track, sr)
+   recs.append(Record(0.0, sr, track.shape, track.flatten()))
+
+   # load model
+   model = algorithms.get(model_conf.get_string('name'))(**model_conf['args'])
+   model.load_state_dict(torch.load(Path(model_path)))
+
+   # init data loader
+   dataset = NewBaseDataset(data=recs)
+   dataloader = DataLoader(
+       dataset,
+       batch_size=1,
+       collate_fn=make_collate_fn(torch.device('cpu'), model)
+   )
+
+   model.eval()
+   label, data, _, pad_lengths = next(iter(dataloader))
+   preds = model.forward((data, pad_lengths))
+   diagnosis = 'covid' if torch.round(preds) == 1.0 else 'healthy'
+   print(f'Evaluation finished.\n Prediction: {preds.item()}\n'
+         f' Model diagnosis: {diagnosis}')
+
+
+if __name__ == '__main__':
+   args = parse_args()
+   eval_track(args.config, args.model, args.track)
+
+import torch
+
+import librosa
+import librosa.feature
+
+def wav_questible(preds, data, idx, path_to_save, spec):
+   data_np = data.cpu().numpy()
+   print(f'Start generate questible tracks for batch {idx + 1}')
+   for bt in range(len(preds)):
+       if (preds[bt].cpu().numpy()[0] < 0.6) and (preds[bt].cpu().numpy()[0] > 0.4):
+           for idxx in range(data_np.shape[0]):
+               if idxx == 0:
+                   rec = data[idxx][bt]
+               else:
+                   rec = torch.cat((rec, data[idxx][bt]), 1)
+           if spec == 'mfcc':
+               track = librosa.feature.inverse.mfcc_to_audio(rec.cpu().numpy())
+               librosa.output.write_wav(path_to_save + f"questible_{idx + 1}_{bt}_{round(float(preds[bt].cpu().numpy()[0]), 3)}.wav", track, sr=44100)
+
+           elif spec == 'mel':
+               track = librosa.feature.inverse.mel_to_audio(rec.cpu().numpy())
+               librosa.output.write_wav(path_to_save + f"questible_{idx + 1}_{bt}_{round(float(preds[bt].cpu().numpy()[0]), 3)}.wav", track, sr=44100)
+           else:
+               raise ValueError("Wrong spectrogram type. Can't save samples")
+
+   print('Saved questible')
+
+def wav_mistaken(preds, data, idx, label, path_to_save, spec):
+   print(f'Start generate mistaken tracks for batch {idx + 1}')
+   data_np = data.cpu().numpy()
+   for bt in range(len(preds)):
+       if int(preds[bt]) != int(label[bt]):
+           for idxx in range(data_np.shape[0]):
+               if idxx == 0:
+                   rec = data[idxx][bt]
+               else:
+                   rec = torch.cat((rec, data[idxx][bt]), 1)
+           if spec == 'mfcc':
+               track = librosa.feature.inverse.mfcc_to_audio(rec.cpu().numpy())
+               librosa.output.write_wav(path_to_save + f"mistaken_{idx + 1}_{bt}.wav", track, sr=44100)
+           elif spec == 'mel':
+               track = librosa.feature.inverse.mel_to_audio(rec.cpu().numpy())
+               librosa.output.write_wav(path_to_save + f"mistaken_{idx + 1}_{bt}.wav", track, sr=44100)
+           else:
+               raise ValueError("Wrong spectrogram type. Can't save samples")
+   print('Saved mistaken')
+#!/usr/bin/env
+import numpy as np
+import pandas as pd
+import argparse
+import re
+import os
+import sys
+import unicodedata
+
+
+def parse_args():
+   parser = argparse.ArgumentParser(
+       description='Script to transliterating file names')
+
+   parser.add_argument('-idt', '--input-dataset-table', type=str,
+                       help='table with dataset info')
+
+   parser.add_argument('-idp', '--input-dataset-path', type=str,
+                       help='dataset path')
+
+   return parser.parse_args()
+
+
+def get_rus_name(tab_path):
+   """
+   get indexes of records with russian name in the table
+   :param tab_path: path to the table
+   :return indexes in the table
+   """
+
+   def get_idxs(rec_name, ind):
+       if bool(re.search('[?-??-?]', rec_name)):
+           return ind
+
+   if 'xlsx' in tab_path:
+       data = pd.read_excel(tab_path)
+   else:
+       data = pd.read_csv(tab_path)
+   recs = data.iloc[:, 0].to_numpy()
+   # amount of lines for table header
+   extra_ind = 0
+   while type(recs[extra_ind]) == float:
+       extra_ind += 1
+   rec_names = recs[extra_ind:]
+   indxs = np.arange(0, len(rec_names))
+   rus_indxs = np.array(list(map(get_idxs, rec_names, indxs)))
+   return rus_indxs[rus_indxs != np.array(None)] + extra_ind
+
+
+def translit_table(tab_path, rus_idxs, csv_fl=True):
+   """
+   changes russian names of records in the table
+   :param tab_path: path to the table
+   :param rus_idxs: indexes of necessary records in the table
+   :param csv_fl: flag indicating to save the file in .csv format
+   :return old full names of records (e.g. /audio/sick/covid/???.wav)
+   """
+
+   def transliteration(idx):
+       cyrillic = '??????????????????????????????????????????????????????????????????'
+       latin = 'a|b|v|g|d|e|e|zh|z|i|i|k|l|m|n|o|p|r|s|t|u|f|kh|tc|ch|sh|shch||y||e|iu|ia|' \
+               'A|B|V|G|D|E|E|Zh|Z|I|I|K|L|M|N|O|P|R|S|T|U|F|Kh|Tc|Ch|Sh|Shch||Y||E|Iu|Ia'.split('|')
+       old_nam = data.iloc[idx, 0].partition('.')[2]
+       new_nam = unicodedata.normalize('NFC', data.iloc[idx, 0]).translate({ord(k): v for k, v in zip(cyrillic, latin)})
+       data.iloc[idx, 0] = new_nam
+       return old_nam
+
+   if 'xlsx' in tab_path:
+       data = pd.read_excel(tab_path)
+   else:
+       data = pd.read_csv(tab_path)
+   old_rec_names = list(map(transliteration, rus_idxs))
+   # save the table
+   if csv_fl:
+       if 'xlsx' in tab_path:
+           data.to_csv(tab_path.rpartition('.')[0] + '.csv', index=False)
+       else:
+           data.to_csv(tab_path, index=False)
+   else:
+       data.to_excel(tab_path, index=False)
+   return old_rec_names
+
+
+def translit_files(tab_path, data_path, rus_idxs, old_names):
+   """
+   changes the russian names of the files themselves
+   :param tab_path: path to the table
+   :param data_path: path to the directory with dataset
+   :param rus_idxs: indexes of necessary records in the table
+   :param old_names: old (current) names of files
+   """
+
+   def rename_files(list_i, tab_i):
+       try:
+           os.rename(data_path + old_names[list_i], data_path + data.iloc[tab_i, 0].partition('.')[2])
+       except OSError:
+           print('File ', data_path + unicodedata.normalize('NFC', old_names[list_i]), 'does not exist')
+
+   data = pd.read_excel(tab_path)
+   list_indxs = np.arange(0, len(old_names))
+   _ = list(map(rename_files, list_indxs, rus_idxs))
+
+
+if __name__ == "__main__":
+   args = parse_args()
+   table_path = args.input_dataset_table
+   dataset_path = args.input_dataset_path
+   rus_indexes = get_rus_name(table_path)
+   if len(rus_indexes) > 0:
+       rec_old_names = translit_table(table_path, rus_indexes, csv_fl=False)
+       translit_files(table_path, dataset_path, rus_indexes, rec_old_names)
+   print('The program is over')
+
+#!/usr/bin/env
+import os
+import argparse
+import warnings
+
+import torch
+from torch.utils.data import DataLoader
+import librosa
+import librosa.feature
+import librosa.display
+import numpy as np
+import pylab
+import cv2
+
+from data.data_pipeline.utils import make_collate_fn
+from core.pipeline import prepare_config
+from tools.noiser.noiser import DatasetWithoutLoad
+from tools.load_model import load_model
+warnings.filterwarnings("ignore")
+
+
+def parse_args():
+   parser = argparse.ArgumentParser(
+       description='Script to evaluate one record using the model')
+
+   parser.add_argument('-m', '--model', type=str,
+                       required=True, help='path to model')
+   parser.add_argument('-c', '--config', type=str,
+                       required=True, help='path to config file')
+   parser.add_argument('-i', '--input', type=str,
+                       required=True, help='input path')
+   parser.add_argument('-o', '--output', type=str,
+                       required=True, help='output path')
+
+   return parser.parse_args()
+
+
+def visual(path_input, model, path_output):
+
+   seq_elem_size = model.shape[-1]
+   if not os.path.exists(os.path.join(path_output, 'spectrogram')):
+       os.mkdir(os.path.join(path_output, 'spectrogram'))
+   folder = os.path.join(path_output, 'spectrogram')
+   track, sr = librosa.load(path_input, sr=44100)
+
+   data = [{
+       'label': 1,
+       'data': [librosa.feature.mfcc(track)],
+       'source': path_input,
+   }]
+   print(f'TRACK SHAPE: {librosa.feature.mfcc(track).shape}')
+
+   preds, weg = get_pred(data, model)
+
+   track_mel = librosa.feature.melspectrogram(track)
+   pylab.axis('off')  # no axis
+   pylab.axes([0., 0., 1., 1.], frameon=False, xticks=[], yticks=[])  # Remove the white edge
+
+   librosa.display.specshow(librosa.power_to_db(track_mel, ref=np.max))
+   pylab.savefig(folder + '/raw_spec.jpg', bbox_inches=None, pad_inches=0)
+   pylab.close()
+   for i in range((track_mel.shape[1] // seq_elem_size) + 1):
+       if track_mel.shape[1] - i * seq_elem_size < seq_elem_size:
+           w = track_mel.shape[0]
+           h = track_mel.shape[1] - i * seq_elem_size
+           if track_mel.shape[1] - i * seq_elem_size < (seq_elem_size / 2) + 1:
+               print(f'sequence #{i+1} with size {w, h} sequence length < {seq_elem_size} / 2, not evaluated')
+           else:
+               print(f'sequence #{i + 1} with size {w, h} and attention weight {weg[i]}')
+       else:
+           w = track_mel.shape[0]
+           h = seq_elem_size
+           print(f'sequence #{i+1} with size {w, h} and attention weight {weg[i]}')
+       audio = track_mel[:, seq_elem_size * i:(seq_elem_size * i) + h]
+       audio = librosa.feature.inverse.mel_to_audio(audio)
+       pylab.axis('off')  # no axis
+       pylab.axes([0., 0., 1., 1.], frameon=False, xticks=[], yticks=[])  # Remove the white edge
+       S = librosa.feature.melspectrogram(y=audio, sr=44100)
+       if h != seq_elem_size:
+           S = np.pad(S, (0,seq_elem_size-S.shape[1]))[:S.shape[0]]
+
+       librosa.display.specshow(librosa.power_to_db(S, ref=np.max))
+       pylab.savefig(folder + f'/test{i}.jpg', bbox_inches=None, pad_inches=0)
+       pylab.close()
+       S = cv2.imread(folder + f'/test{i}.jpg')
+       if h != seq_elem_size:
+           S = S[:, :int(S.shape[1] * h/seq_elem_size)]
+       os.remove(folder + f'/test{i}.jpg')
+       if h > seq_elem_size / 2:
+           S = S * float(weg[i] + 1.05 - max(weg))
+       else:
+           S = S * float(min(weg) + 1.05 - max(weg))
+       if i == 0:
+           full = S
+           width = S.shape[0]
+       else:
+           S = cv2.resize(S, (int(S.shape[1] * (S.shape[0] / width)), width))
+           full = cv2.hconcat([full, S])
+   raw = cv2.imread(folder + '/raw_spec.jpg')
+   os.remove(folder + '/raw_spec.jpg')
+   raw = cv2.resize(raw, (full.shape[1], full.shape[0]))
+
+   cv2.imwrite(folder + '/raw_spec.jpg', raw)
+   cv2.imwrite(folder + '/weighted_spec.jpg', full)
+   diag = 'COVID' if preds.item() > 0.5 else 'NO COVID'
+   print(f'MODEL PREDICTION: {round(float(preds.item()), 5)}  ::: {diag} \n'
+         f'Attention weights: {weg}')
+
+
+def get_pred(data, model):
+
+   dataset = DatasetWithoutLoad(data=data)
+   dataloader = DataLoader(dataset,
+                           batch_size=1,
+                           collate_fn=make_collate_fn(torch.device('cuda'),
+                                                      model))
+
+   model.eval()
+
+   for idx, batch in enumerate(dataloader):
+       if len(batch) == 3:
+           _, data, pad_lengths = batch
+           preds = model.forward((data, pad_lengths))
+       else:
+           _, data = batch
+           preds = model.forward(data)
+
+   weg = model._net._attention.attention_weights.tolist()
+
+   return preds, weg
+
+
+def prepare(config_path, model_path):
+   _, model_conf, _, _ = prepare_config(config_path)
+
+   # load model
+   model = load_model(model_path,
+                      model_conf.get_string('name'),
+                      model_conf.get_list('args.input_shape'),
+                      model_conf['args.dropout_rate']
+                      )
+
+   return model
+
+if __name__ == '__main__':
+   args = parse_args()
+   model = prepare(args.config, args.model)
+   visual(args.input, model, args.output)
+librosa==0.7.2
+matplotlib~=3.3.0
+numpy~=1.18.5
+scikit-learn==0.22.2.post1
+scikit-sound==0.2.3
+scipy==1.4.1
+SoundFile==0.10.3.post1
+torch~=1.6.0
+torchvision~=0.7.0
+pandas==1.1.0
+pyhocon~=0.3.55
+opencv-python~=4.3.0.36
+audiomentations==0.13.0
+#!/usr/bin/env
+import argparse
+from core.pipeline import app_pipeline
+from core.train.train_pipeline import train_pipeline
+
+
+def parse_args():
+   parser = argparse.ArgumentParser(
+       description='Script to run training process')
+
+   parser.add_argument('-c', '--config', type=str,
+                       required=True,
+                       help='path to config file')
+
+   return parser.parse_args()
+
+
+if __name__ == '__main__':
+   print('Start training process.', 'Info prints via TensorBoard', sep='\n')
+   args = parse_args()
+   app_pipeline(args.config, train_pipeline)
+   print('Finish training process.')
+
+
